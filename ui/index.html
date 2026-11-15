@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lume</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <nav class="rail">
+    <div class="logo">✳</div>
+    <button class="on" title="Sala">⌂</button>
+    <button title="Nova sala" data-open="new">＋</button>
+    <button title="Entrar com convite" data-open="join">⤓</button>
+    <div class="sp"></div>
+    <button id="theme" title="Tema claro/escuro">◐</button>
+  </nav>
+
+  <div class="shell">
+    <aside class="side">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <div class="me">
+        <div class="av" id="meAv">?</div>
+        <div><input id="meName" class="name" placeholder="Seu nome" maxlength="32"><small>Conexão direta P2P</small></div>
+      </div>
+
+      <div class="lbl">Sala</div>
+      <div class="item on" id="roomItem"><span class="dot" id="roomDot"></span><span id="roomLabel">Nenhuma sala</span><span class="n" id="roomCount">0</span></div>
+
+      <div class="lbl">Ações</div>
+      <div class="item" data-open="new"><span>＋</span>Criar sala</div>
+      <div class="item" data-open="join"><span>⤓</span>Entrar com convite</div>
+      <div class="item hostOnly" data-open="invite"><span>✉</span>Convidar / aprovar</div>
+
+      <div class="sp"></div>
+      <div class="hint">Salas existem só enquanto o anfitrião está com o app aberto. Nada passa por servidor: STUN público é usado apenas para descobrir o caminho entre os PCs.</div>
+    </aside>
+
+    <main>
+      <div class="top">
+        <div><h1 id="title">Lume</h1><div class="sub" id="subtitle">Crie uma sala ou entre com um convite</div></div>
+        <div class="act">
+          <button class="btn ghost hostOnly" data-open="invite">✉ Convidar</button>
+          <button class="btn pri hostOnly" id="share">▶ Compartilhar tela</button>
+          <button class="btn ghost inRoom" id="leave">Sair</button>
+        </div>
+      </div>
+
+      <div class="empty" id="empty">
+        <div class="hero">
+          <div class="big">✳</div>
+          <h2>Compartilhe sua tela, direto entre PCs</h2>
+          <p>Sem conta, sem servidor, sem instalação. Só entra quem recebe um convite.</p>
+          <div class="row2"><button class="btn pri" data-open="new">Criar sala</button><button class="btn ghost" data-open="join">Tenho um convite</button></div>
+        </div>
+      </div>
+
+      <div class="grid" id="roomView" hidden>
+        <div class="card stage" id="stage">
+          <video id="video" autoplay playsinline></video>
+          <div class="placeholder" id="ph">Aguardando transmissão…</div>
+          <div class="hud"><span class="chip"><span class="dot live"></span><span id="hres">—</span></span><span class="chip" id="hfps">— fps</span><span class="chip" id="hlat">— ms</span></div>
+          <div class="bar">
+            <button id="mic" class="off hostOnly" title="Microfone">🎙</button>
+            <button id="mute" class="guestOnly" title="Silenciar">🔊</button>
+            <button id="fs" title="Tela cheia">⛶</button>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="card">
+            <h3>Conexão <span id="connState" class="mute">—</span></h3>
+            <div class="stats">
+              <div class="stat"><small>Latência</small><b id="sLat">—</b></div>
+              <div class="stat"><small>Bitrate</small><b id="sBr">—</b></div>
+              <div class="stat"><small>Perda</small><b id="sLoss">—</b></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Qualidade <span class="mute" id="qWho">aplica a todos</span></h3>
+            <div class="row">Resolução<div class="seg" data-k="res"><button data-v="720">720p</button><button data-v="1080" class="on">1080p</button><button data-v="0">Nativa</button></div></div>
+            <div class="row">FPS<div class="seg" data-k="fps"><button data-v="30">30</button><button data-v="60" class="on">60</button></div></div>
+            <div class="row">Prioridade<div class="seg" data-k="pri"><button data-v="motion" class="on">Fluidez</button><button data-v="detail">Nitidez</button></div></div>
+            <div class="row">Bitrate máx. <span id="brv" class="mute">8 Mbps</span><input id="br" type="range" min="1" max="40" value="8"></div>
+          </div>
+
+          <div class="card grow">
+            <h3>Participantes <span class="mute" id="pCount">0 / 8</span></h3>
+            <div id="peers"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="modal" id="modal"><div class="sheet" id="sheet"></div></div>
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
