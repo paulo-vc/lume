@@ -1,5 +1,5 @@
 // Lume - interface + WebRTC (o WebView2 usa o encoder H.264 por hardware da GPU).
-// A criptografia dos convites e a validação de quem entra ficam no Rust (src-tauri/src/room.rs).
+// O código da sala, a cifra e a troca automática com o anfitrião ficam no Rust (room.rs e signal.rs).
 'use strict';
 
 const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : async () => { throw 'Rode dentro do app' };
@@ -53,7 +53,7 @@ function render() {
   $('roomDot').className = 'dot' + (inRoom ? ' live' : '');
   if (S.role === 'host') {
     $('title').textContent = S.room.name;
-    $('subtitle').textContent = 'Você é o anfitrião · sala privada, só por convite';
+    $('subtitle').textContent = `Você é o anfitrião · código da sala: ${S.room.code}`;
     $('roomLabel').textContent = S.room.name;
     $('qWho').textContent = 'aplica a todos';
   } else if (S.role === 'guest') {
@@ -62,7 +62,7 @@ function render() {
     $('roomLabel').textContent = 'Sala do anfitrião';
     $('qWho').textContent = 'pede ao anfitrião';
   } else {
-    $('title').textContent = 'Lume'; $('subtitle').textContent = 'Crie uma sala ou entre com um convite';
+    $('title').textContent = 'Lume'; $('subtitle').textContent = 'Crie uma sala ou entre com um código';
     $('roomLabel').textContent = 'Nenhuma sala';
   }
   renderPeers();
@@ -95,63 +95,68 @@ function openModal(kind) {
       <label>Nome da sala</label><input class="field" id="fRoom" value="Sala de ${esc(myName())}" maxlength="40">
       <div class="act"><button class="btn ghost" id="x">Cancelar</button><button class="btn pri" id="ok">Criar sala</button></div>`;
     $('x').onclick = closeModal;
-    $('ok').onclick = async () => { S.room = await invoke('create_room', { name: $('fRoom').value.trim() || 'Sala' }); S.role = 'host'; render(); openModal('invite'); };
+    $('ok').onclick = async () => {
+      try { S.room = await invoke('create_room', { name: $('fRoom').value.trim() || 'Sala' }); }
+      catch (err) { return toast(String(err)); }
+      S.role = 'host'; render(); openModal('invite');
+    };
   }
   if (kind === 'invite') {
     if (S.role !== 'host') return;
-    const mins = Math.max(0, Math.round((S.room.expires_at * 1000 - Date.now()) / 60000));
-    sheet.innerHTML = `<h2>Convidar e aprovar</h2>
-      <div class="step"><b>1</b>Envie este convite (expira em ${mins} min)</div>
-      <div class="code" id="inv">${esc(S.room.invite)}</div>
-      <div class="act" style="margin-top:8px;justify-content:flex-start"><button class="btn ghost" id="cp">Copiar convite</button><button class="btn ghost" id="rot">Gerar novo (invalida o atual)</button></div>
-      <div class="step"><b>2</b>Cole o pedido de entrada que a pessoa te devolver</div>
-      <textarea class="field" id="req" placeholder="SLQ-…"></textarea>
-      <div id="reqOut"></div>
-      <div class="act"><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="chk">Verificar pedido</button></div>`;
+    sheet.innerHTML = `<h2>Código da sala</h2><p>Mande este código para quem você quer convidar. A pessoa digita no Lume dela e você só clica em Aceitar.</p>
+      <div class="bigcode" id="inv">${esc(S.room.code)}</div>
+      <div class="mute" id="relay" style="text-align:center;font-size:12px;margin-top:8px"></div>
+      <div class="act"><button class="btn ghost" id="rot">Trocar código</button><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="cp">Copiar código</button></div>`;
     $('x').onclick = closeModal;
-    $('cp').onclick = () => copy(S.room.invite);
-    $('rot').onclick = async () => { S.room = await invoke('new_invite'); openModal('invite'); toast('Convite antigo invalidado'); };
-    $('chk').onclick = async () => {
-      const code = $('req').value.trim();
-      try {
-        const g = { name: await invoke('inspect_request', { code }) };
-        if (S.peers.has(g.name)) throw 'Já existe alguém com esse nome na sala';
-        $('reqOut').innerHTML = `<div class="req"><div class="av">${esc(initials(g.name))}</div><div><b style="font-weight:500">${esc(g.name)}</b><div class="mute">convite válido · quer entrar</div></div>
-          <div class="sp"></div><button class="btn ghost" id="no">Recusar</button><button class="btn pri" id="yes">Aprovar</button></div>`;
-        $('no').onclick = () => { $('reqOut').innerHTML = ''; $('req').value = ''; };
-        $('yes').onclick = () => approveGuest(code, g.name);
-      } catch (err) { toast(String(err)); }
+    $('cp').onclick = () => copy(S.room.code);
+    $('rot').onclick = async () => { S.room = await invoke('new_code'); openModal('invite'); toast('O código antigo parou de funcionar'); };
+    const check = async () => {
+      if (!$('relay')) return;
+      const n = await invoke('relays_online').catch(() => 0);
+      $('relay').textContent = n ? '● Sala aberta para pedidos de entrada' : 'Conectando aos servidores de encontro…';
+      $('relay').style.color = n ? 'var(--good)' : '';
+      if (!n) setTimeout(check, 1000);
     };
+    check();
   }
   if (kind === 'join') {
     if (S.role) return toast('Saia da sala atual primeiro');
-    sheet.innerHTML = `<h2>Entrar com convite</h2><p>São dois códigos trocados com o anfitrião (por qualquer chat). Isso substitui um servidor.</p>
+    sheet.innerHTML = `<h2>Entrar numa sala</h2><p>Digite o código que o anfitrião te mandou.</p>
       <label>Seu nome</label><input class="field" id="jName" value="${esc(myName())}" maxlength="32">
-      <div class="step"><b>1</b>Cole o convite</div><input class="field" id="jInv" placeholder="sl://join/…">
-      <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn pri" id="gen">Gerar pedido de entrada</button></div>
-      <div id="jStep2"></div>
-      <div class="act"><button class="btn ghost" id="x">Cancelar</button></div>`;
-    $('x').onclick = () => { if (S.guestPc && S.role !== 'guest') { S.guestPc.close(); S.guestPc = null; } closeModal(); };
-    $('gen').onclick = guestStart;
+      <label>Código da sala</label><input class="field codein" id="jCode" placeholder="K7QM-2XPD-9RTA" maxlength="20" spellcheck="false" autocomplete="off">
+      <div class="mute" id="jStatus" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <div class="act"><button class="btn ghost" id="x">Cancelar</button><button class="btn pri" id="go">Entrar</button></div>`;
+    $('x').onclick = () => { invoke('cancel_join').catch(() => {}); if (S.guestPc && S.role !== 'guest') { S.guestPc.close(); S.guestPc = null; } closeModal(); };
+    $('go').onclick = guestStart;
+    $('jCode').onkeydown = e => { if (e.key === 'Enter') guestStart(); };
+    setTimeout(() => $('jCode') && $('jCode').focus(), 50);
   }
   modal.classList.add('show');
 }
 
 // ---------- ANFITRIÃO (captura, encoder e conexões são nativos, em Rust) ----------
-async function approveGuest(code, name) {
-  $('yes').disabled = true; $('yes').textContent = 'Conectando…';
-  try {
-    const reply = await invoke('approve_request', { code });
-    S.peers.set(name, { state: 'aguardando' });
-    $('reqOut').innerHTML = `<div class="step"><b>3</b>Envie esta resposta para ${esc(name)}</div><div class="code">${esc(reply)}</div>
-      <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn pri" id="cpr">Copiar resposta</button></div>`;
-    $('cpr').onclick = () => copy(reply);
-    $('req').value = '';
-    renderPeers();
-  } catch (err) { toast(String(err)); $('yes').disabled = false; $('yes').textContent = 'Aprovar'; }
+// Pedidos de entrada chegam sozinhos; o anfitrião só aceita ou recusa.
+function showRequest({ id, name }) {
+  const el = document.createElement('div');
+  el.className = 'reqcard';
+  el.innerHTML = `<div class="av">${esc(initials(name))}</div><div class="who"><b>${esc(name)}</b><small>quer entrar na sala</small></div>
+    <button class="btn ghost" data-a="no">Recusar</button><button class="btn pri" data-a="yes">Aceitar</button>`;
+  el.querySelector('[data-a=no]').onclick = () => { invoke('deny_request', { id }).catch(() => {}); el.remove(); };
+  el.querySelector('[data-a=yes]').onclick = async e => {
+    e.target.disabled = true; e.target.textContent = 'Conectando…';
+    try {
+      const who = await invoke('approve_request', { id });
+      S.peers.set(who, { state: 'connecting' });
+      renderPeers();
+    } catch (err) { toast(String(err)); }
+    el.remove();
+  };
+  $('reqs').appendChild(el);
+  if (modal.classList.contains('show') && $('inv')) closeModal();
 }
 
 const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
+listen('join-request', ({ payload }) => { if (S.role === 'host') showRequest(payload); });
 const STATE_PT = { connected: 'conectado', connecting: 'conectando', new: 'aguardando', disconnected: 'instável', failed: 'falhou', closed: 'saiu' };
 listen('peer-state', ({ payload: [name, st] }) => {
   const p = S.peers.get(name); if (!p) return;
@@ -239,9 +244,12 @@ $('share').onclick = () => S.sharing ? stopShare() : openPicker();
 
 // ---------- CONVIDADO ----------
 async function guestStart() {
-  const invite = $('jInv').value.trim();
+  const code = $('jCode').value.trim();
   const name = $('jName').value.trim() || 'Convidado';
+  if (code.replace(/[^a-z0-9]/gi, '').length !== 12) return toast('O código tem 12 letras e números');
   $('meName').value = name; $('meName').oninput();
+  $('go').disabled = true; $('jCode').disabled = true; $('jName').disabled = true;
+  $('jStatus').textContent = 'Preparando a conexão…';
   const pc = new RTCPeerConnection({ iceServers: ICE });
   const vt = pc.addTransceiver('video', { direction: 'recvonly' });
   pc.addTransceiver('audio', { direction: 'recvonly' });
@@ -262,23 +270,17 @@ async function guestStart() {
   };
   await pc.setLocalDescription(await pc.createOffer());
   await waitIce(pc);
-  let r;
-  try { r = await invoke('make_join_request', { invite, name, offerSdp: pc.localDescription.sdp }); }
-  catch (err) { pc.close(); return toast(String(err)); }
   S.guestPc = pc; S.guestDc = dc;
-  $('gen').disabled = true;
-  $('jStep2').innerHTML = `<div class="step"><b>2</b>Envie este pedido ao anfitrião</div><div class="code">${esc(r.request)}</div>
-    <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn ghost" id="cpq">Copiar pedido</button></div>
-    <div class="step"><b>3</b>Cole a resposta do anfitrião</div><textarea class="field" id="jRep" placeholder="SLR-…"></textarea>
-    <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn pri" id="con">Conectar</button></div>`;
-  $('cpq').onclick = () => copy(r.request);
-  $('con').onclick = async () => {
-    try {
-      const sdp = await invoke('open_reply', { code: $('jRep').value.trim() });
-      await pc.setRemoteDescription({ type: 'answer', sdp });
-      S.role = 'guest'; render(); toast('Conectando…');
-    } catch (err) { toast(String(err)); }
-  };
+  if ($('jStatus')) $('jStatus').textContent = 'Pedido enviado. Aguardando o anfitrião aceitar…';
+  try {
+    const sdp = await invoke('join_room', { code, name, offerSdp: pc.localDescription.sdp });
+    await pc.setRemoteDescription({ type: 'answer', sdp });
+    S.role = 'guest'; render(); closeModal(); toast('Aceito! Conectando…');
+  } catch (err) {
+    pc.close(); if (S.guestPc === pc) S.guestPc = S.guestDc = null;
+    if (String(err) !== 'Cancelado') toast(String(err), 5000);
+    if ($('jStatus')) { $('jStatus').textContent = ''; $('go').disabled = false; $('jCode').disabled = false; $('jName').disabled = false; }
+  }
 }
 
 $('mute').onclick = () => { const v = $('video'); v.muted = !v.muted; $('mute').classList.toggle('off', v.muted); };
@@ -303,6 +305,7 @@ function qualityChanged() {
 function leave() {
   stopShare();
   if (S.role === 'host') invoke('close_room').catch(() => {});
+  $('reqs').innerHTML = '';
   S.peers.clear();
   if (S.guestPc) S.guestPc.close();
   S.guestPc = S.guestDc = null; S.role = null; S.room = null;

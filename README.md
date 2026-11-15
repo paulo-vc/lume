@@ -1,6 +1,6 @@
 # Lume
 
-Compartilhamento de tela P2P, portátil (um `.exe`), sem servidor e só por convite.
+Compartilhamento de tela P2P, portátil (um `.exe`), sem conta e só entra quem tem o código da sala.
 
 ## Como funciona
 
@@ -15,21 +15,23 @@ Compartilhamento de tela P2P, portátil (um `.exe`), sem servidor e só por conv
     (ex.: Discord, para a call não voltar como eco) ou PC inteiro. Requer Windows 10 2004+.
   - Envio por WebRTC nativo (`webrtc-rs`, `src-tauri/src/stream.rs`), uma conexão por convidado.
 - **Quem assiste:** recebe pelo WebRTC do WebView2, com decodificação pela placa de vídeo e buffer curto (40 ms).
-- **Salas e convites:** `src-tauri/src/room.rs`. Convite com segredo de 256 bits que expira em 15 min.
-  Pedidos e respostas são assinados com HMAC-SHA256, o que garante:
-  - sem o convite não se gera um pedido válido;
-  - pedidos não podem ser reutilizados;
-  - o convidado confere se a resposta veio do anfitrião verdadeiro;
-  - o anfitrião aprova cada pessoa.
+- **Salas por código:** `src-tauri/src/room.rs`. Cada sala tem um código de 12 caracteres
+  (ex.: `K7QM-2XPD-9RTA`, ~60 bits). Do código saem o endereço do ponto de encontro e a chave
+  ChaCha20-Poly1305 que cifra e autentica o pedido de entrada e a resposta. Garante:
+  - sem o código não se acha a sala nem se gera um pedido válido;
+  - o convidado sabe que a resposta veio de quem tem o código;
+  - o anfitrião aceita ou recusa cada pessoa.
+- **Ponto de encontro:** `src-tauri/src/signal.rs`. Os dois lados trocam os dados de conexão por
+  relays MQTT públicos (três ao mesmo tempo; basta um no ar). O relay só vê bytes cifrados e é usado
+  apenas no aperto de mão; vídeo e áudio nunca passam por ele.
 - **Rede:** conexão direta; STUN público só para descobrir o endereço externo. Sem TURN, então
   NAT simétrico/CGNAT pode impedir a conexão (use IPv6, encaminhamento de porta ou Tailscale/ZeroTier).
 
 ## Entrar numa sala
 
-1. O anfitrião cria a sala e envia o **convite** (`sl://join/…`).
-2. O convidado cola o convite e devolve o **pedido** (`SLQ-…`).
-3. O anfitrião cola o pedido, aprova e devolve a **resposta** (`SLR-…`).
-4. O convidado cola a resposta e a conexão é direta.
+1. O anfitrião cria a sala e manda o **código** para quem quiser convidar.
+2. O convidado digita o código e clica em **Entrar**.
+3. No anfitrião aparece "Fulano quer entrar": **Aceitar** e pronto.
 
 ## Compilar
 
@@ -50,6 +52,5 @@ Testes nativos (capturam a tela de verdade): `cargo test -- --ignored`.
 
 - Passar os quadros direto na GPU (textura D3D11 -> encoder), sem a cópia pela CPU.
 
-- Troca automática dos códigos por relays Nostr públicos, cifrada com o segredo do convite.
 - Pipeline nativo opcional (captura WGC + Media Foundation em Rust) para reduzir ainda mais o uso de CPU e RAM.
 - Modo IP:porta direto para redes onde o STUN não basta.

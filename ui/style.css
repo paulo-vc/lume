@@ -94,3 +94,11 @@ body.host .guestOnly,body.guest .hostOnly,body:not(.host) .hostOnly,body:not(.ho
 .audio{display:flex;gap:8px;flex-wrap:wrap}
 .audio select{flex:1;min-width:180px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:inherit;font:inherit;font-size:13px}
 #aHint{font-size:12px;margin-top:6px;min-height:16px}
+
+.bigcode{font:600 30px Consolas,monospace;letter-spacing:3px;text-align:center;background:var(--panel);border:1px dashed var(--line);border-radius:16px;padding:20px 12px;user-select:all}
+.codein{font:600 18px Consolas,monospace;letter-spacing:2px;text-transform:uppercase;text-align:center}
+.reqs{position:fixed;top:18px;right:18px;display:flex;flex-direction:column;gap:10px;z-index:30}
+.reqcard{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:12px 14px;box-shadow:0 12px 40px rgba(0,0,0,.25);font-size:13px;min-width:340px}
+.reqcard .who{flex:1;min-width:0}
+.reqcard .who b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reqcard .who small{color:var(--mute);font-size:11px}

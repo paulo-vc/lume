@@ -12,7 +12,7 @@
     <div class="logo">✳</div>
     <button class="on" title="Sala">⌂</button>
     <button title="Nova sala" data-open="new">＋</button>
-    <button title="Entrar com convite" data-open="join">⤓</button>
+    <button title="Entrar com código" data-open="join">⤓</button>
     <div class="sp"></div>
     <button id="theme" title="Tema claro/escuro">◐</button>
   </nav>
@@ -30,16 +30,16 @@
 
       <div class="lbl">Ações</div>
       <div class="item" data-open="new"><span>＋</span>Criar sala</div>
-      <div class="item" data-open="join"><span>⤓</span>Entrar com convite</div>
-      <div class="item hostOnly" data-open="invite"><span>✉</span>Convidar / aprovar</div>
+      <div class="item" data-open="join"><span>⤓</span>Entrar com código</div>
+      <div class="item hostOnly" data-open="invite"><span>✉</span>Código da sala</div>
 
       <div class="sp"></div>
-      <div class="hint">Salas existem só enquanto o anfitrião está com o app aberto. Nada passa por servidor: STUN público é usado apenas para descobrir o caminho entre os PCs.</div>
+      <div class="hint">Salas existem só enquanto o anfitrião está com o app aberto. Vídeo e áudio vão direto entre os PCs. Servidores públicos são usados só para os PCs se encontrarem, com tudo cifrado pelo código da sala.</div>
     </aside>
 
     <main>
       <div class="top">
-        <div><h1 id="title">Lume</h1><div class="sub" id="subtitle">Crie uma sala ou entre com um convite</div></div>
+        <div><h1 id="title">Lume</h1><div class="sub" id="subtitle">Crie uma sala ou entre com um código</div></div>
         <div class="act">
           <button class="btn ghost hostOnly" data-open="invite">✉ Convidar</button>
           <button class="btn pri hostOnly" id="share">▶ Compartilhar tela</button>
@@ -51,8 +51,8 @@
         <div class="hero">
           <div class="big">✳</div>
           <h2>Compartilhe sua tela, direto entre PCs</h2>
-          <p>Sem conta, sem servidor, sem instalação. Só entra quem recebe um convite.</p>
-          <div class="row2"><button class="btn pri" data-open="new">Criar sala</button><button class="btn ghost" data-open="join">Tenho um convite</button></div>
+          <p>Sem conta, sem servidor, sem instalação. Só entra quem tem o código e você aceita.</p>
+          <div class="row2"><button class="btn pri" data-open="new">Criar sala</button><button class="btn ghost" data-open="join">Tenho um código</button></div>
         </div>
       </div>
 
@@ -96,6 +96,7 @@
 </div>
 
 <div class="modal" id="modal"><div class="sheet" id="sheet"></div></div>
+<div class="reqs" id="reqs"></div>
 <div class="toast" id="toast"></div>
 
 <script src="app.js"></script>
