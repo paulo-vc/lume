@@ -5,8 +5,12 @@ Compartilhamento de tela P2P, portátil (um `.exe`), sem servidor e só por conv
 ## Como funciona
 
 - **Interface:** HTML/CSS em `ui/`, exibida pelo WebView2 (já vem no Windows 10/11).
-- **Vídeo e áudio:** WebRTC do WebView2. A captura usa a API de captura de tela do Windows e o
-  encoder H.264 é o da GPU (NVENC / QuickSync / AMF) quando existe. O receptor usa jitter buffer curto (40 ms).
+- **Transmissão (nativa, em Rust):**
+  - Captura de tela ou de uma janela específica pelo Windows Graphics Capture (`src-tauri/src/capture.rs`).
+    Não aparece a barra "está compartilhando", e no Windows 11 nem a borda amarela.
+  - Vídeo codificado em H.264 (OpenH264 por enquanto; encoder pela placa de vídeo é a próxima etapa).
+  - Envio por WebRTC nativo (`webrtc-rs`, `src-tauri/src/stream.rs`), uma conexão por convidado.
+- **Quem assiste:** recebe pelo WebRTC do WebView2, com decodificação pela placa de vídeo e buffer curto (40 ms).
 - **Salas e convites:** `src-tauri/src/room.rs`. Convite com segredo de 256 bits que expira em 15 min.
   Pedidos e respostas são assinados com HMAC-SHA256, o que garante:
   - sem o convite não se gera um pedido válido;
@@ -36,7 +40,12 @@ cargo build --release
 
 Testes do protocolo de convite: `cargo test`.
 
+Testes nativos (capturam a tela de verdade): `cargo test -- --ignored`.
+
 ## Próximos passos
+
+- Áudio por janela (Process Loopback do Windows) e opção "PC inteiro menos a call".
+- Encoder H.264 pela placa de vídeo (Media Foundation: NVENC / QuickSync / AMF).
 
 - Troca automática dos códigos por relays Nostr públicos, cifrada com o segredo do convite.
 - Pipeline nativo opcional (captura WGC + Media Foundation em Rust) para reduzir ainda mais o uso de CPU e RAM.

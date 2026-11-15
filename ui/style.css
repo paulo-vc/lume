@@ -80,6 +80,12 @@ textarea.field{height:84px;word-break:break-all}
 .step{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--mute);margin:16px 0 4px}
 .step b{width:20px;height:20px;border-radius:50%;background:var(--accent);color:var(--accentInk);display:grid;place-items:center;font-size:11px}
 .req{display:flex;align-items:center;gap:12px;background:var(--panel);border-radius:14px;padding:12px;margin-top:12px}
+.srcs{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
+.src{display:flex;gap:12px;align-items:center;padding:10px 12px;border-radius:14px;background:var(--panel);cursor:pointer;border:1px solid transparent;font-size:13px}
+.src:hover{border-color:var(--mute)}
+.src .ico{width:34px;height:34px;border-radius:10px;background:var(--card);display:grid;place-items:center;flex:none}
+.src b{font-weight:500;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:330px}
+.src small{color:var(--mute);font-size:11px}
 .toast{position:fixed;bottom:22px;left:50%;transform:translate(-50%,20px);background:var(--rail);color:#fff;padding:10px 18px;border-radius:999px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;z-index:20}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 body.host .guestOnly,body.guest .hostOnly,body:not(.host) .hostOnly,body:not(.host):not(.guest) .inRoom,body:not(.guest) .guestOnly{display:none!important}

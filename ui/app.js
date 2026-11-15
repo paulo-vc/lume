@@ -72,7 +72,7 @@ function renderPeers() {
   const list = [];
   if (S.role === 'host') {
     list.push({ name: myName() + ' (você)', tag: 'anfitrião' });
-    for (const [n, p] of S.peers) list.push({ name: n, tag: p.rtt != null ? p.rtt + ' ms' : p.pc.connectionState });
+    for (const [n, p] of S.peers) list.push({ name: n, tag: STATE_PT[p.state] || p.state });
   } else if (S.role === 'guest') {
     list.push({ name: 'Anfitrião', tag: S.guestPc ? S.guestPc.connectionState : '' }, { name: myName() + ' (você)', tag: '' });
   }
@@ -114,12 +114,12 @@ function openModal(kind) {
     $('chk').onclick = async () => {
       const code = $('req').value.trim();
       try {
-        const g = await invoke('inspect_request', { code });
+        const g = { name: await invoke('inspect_request', { code }) };
         if (S.peers.has(g.name)) throw 'Já existe alguém com esse nome na sala';
         $('reqOut').innerHTML = `<div class="req"><div class="av">${esc(initials(g.name))}</div><div><b style="font-weight:500">${esc(g.name)}</b><div class="mute">convite válido · quer entrar</div></div>
           <div class="sp"></div><button class="btn ghost" id="no">Recusar</button><button class="btn pri" id="yes">Aprovar</button></div>`;
         $('no').onclick = () => { $('reqOut').innerHTML = ''; $('req').value = ''; };
-        $('yes').onclick = () => approveGuest(code, g);
+        $('yes').onclick = () => approveGuest(code, g.name);
       } catch (err) { toast(String(err)); }
     };
   }
@@ -137,126 +137,71 @@ function openModal(kind) {
   modal.classList.add('show');
 }
 
-// ---------- ANFITRIÃO ----------
-async function approveGuest(code, g) {
-  const pc = new RTCPeerConnection({ iceServers: ICE });
-  const peer = { pc, dc: null, rtt: null, last: null };
-  pc.ondatachannel = e => { peer.dc = e.channel; peer.dc.onmessage = m => onHostMsg(g.name, m.data); };
-  await pc.setRemoteDescription({ type: 'offer', sdp: g.sdp });
-  // O convidado já ofereceu transceivers recvonly de vídeo e áudio: só ligamos as faixas, sem renegociar.
-  for (const t of pc.getTransceivers()) {
-    t.direction = 'sendonly';
-    if (t.receiver.track.kind === 'video') peer.video = t.sender; else peer.audio = t.sender;
-  }
-  attachTracks(peer);
-  await pc.setLocalDescription(await pc.createAnswer());
-  await waitIce(pc);
+// ---------- ANFITRIÃO (captura, encoder e conexões são nativos, em Rust) ----------
+async function approveGuest(code, name) {
+  $('yes').disabled = true; $('yes').textContent = 'Conectando…';
   try {
-    const reply = await invoke('approve_request', { code, answerSdp: pc.localDescription.sdp });
-    S.peers.set(g.name, peer);
-    pc.onconnectionstatechange = () => {
-      if (['failed', 'closed'].includes(pc.connectionState)) dropPeer(g.name, 'saiu');
-      if (pc.connectionState === 'connected') { toast(`${g.name} entrou`); applyQuality(peer); }
-      renderPeers();
-    };
-    $('reqOut').innerHTML = `<div class="step"><b>3</b>Envie esta resposta para ${esc(g.name)}</div><div class="code">${esc(reply)}</div>
+    const reply = await invoke('approve_request', { code });
+    S.peers.set(name, { state: 'aguardando' });
+    $('reqOut').innerHTML = `<div class="step"><b>3</b>Envie esta resposta para ${esc(name)}</div><div class="code">${esc(reply)}</div>
       <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn pri" id="cpr">Copiar resposta</button></div>`;
     $('cpr').onclick = () => copy(reply);
     $('req').value = '';
     renderPeers();
-  } catch (err) { pc.close(); toast(String(err)); }
+  } catch (err) { toast(String(err)); $('yes').disabled = false; $('yes').textContent = 'Aprovar'; }
 }
 
-function dropPeer(name, why) {
+const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
+const STATE_PT = { connected: 'conectado', connecting: 'conectando', new: 'aguardando', disconnected: 'instável', failed: 'falhou', closed: 'saiu' };
+listen('peer-state', ({ payload: [name, st] }) => {
   const p = S.peers.get(name); if (!p) return;
-  p.pc.close(); S.peers.delete(name); invoke('member_left', { name }).catch(() => {});
-  toast(`${name} ${why}`); renderPeers();
+  p.state = st;
+  if (st === 'connected') toast(`${name} entrou`);
+  if (st === 'failed' || st === 'closed') { S.peers.delete(name); invoke('remove_peer', { name }).catch(() => {}); toast(`${name} ${st === 'failed' ? 'não conseguiu conectar' : 'saiu'}`); }
+  renderPeers();
+});
+listen('quality-changed', ({ payload: [name, q] }) => { toast(`${name} ajustou a qualidade`); syncQualityUI(q); });
+listen('enc-stats', ({ payload: s }) => {
+  if (S.role !== 'host') return;
+  $('hres').textContent = `${s.width}×${s.height} · ${s.encoder}`;
+  $('hfps').textContent = Math.round(s.fps) + ' fps';
+  $('sBr').textContent = (s.kbps / 1000).toFixed(1) + ' M';
+});
+
+function syncQualityUI(q) {
+  Object.assign(S.q, q);
+  document.querySelectorAll('.seg').forEach(seg => seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', String(S.q[seg.dataset.k]) === b.dataset.v)));
+  $('br').value = S.q.br; $('brv').textContent = S.q.br + ' Mbps';
 }
 
-function attachTracks(peer) {
-  const v = S.stream && S.stream.getVideoTracks()[0];
-  const a = mixedAudio();
-  if (peer.video) peer.video.replaceTrack(v || null);
-  if (peer.audio) peer.audio.replaceTrack(a || null);
-}
-
-let audioCtx, audioDest;
-function mixedAudio() {
-  const sys = S.stream && S.stream.getAudioTracks()[0];
-  const mic = S.micStream && S.micStream.getAudioTracks()[0];
-  if (!sys && !mic) return null;
-  if (sys && !mic) return sys;
-  if (!sys && mic) return mic;
-  audioCtx = audioCtx || new AudioContext({ latencyHint: 'interactive' });
-  audioDest = audioCtx.createMediaStreamDestination();
-  audioCtx.createMediaStreamSource(new MediaStream([sys])).connect(audioDest);
-  audioCtx.createMediaStreamSource(new MediaStream([mic])).connect(audioDest);
-  return audioDest.stream.getAudioTracks()[0];
-}
-
-async function startShare() {
-  try {
-    S.stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: S.q.fps, max: 60 }, cursor: 'always' },
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      systemAudio: 'include', selfBrowserSurface: 'exclude',
-    });
-  } catch { return toast('Compartilhamento cancelado'); }
-  const vt = S.stream.getVideoTracks()[0];
-  vt.contentHint = S.q.pri;
-  vt.onended = stopShare;
-  $('video').srcObject = new MediaStream([vt]); $('video').muted = true; $('ph').hidden = true;
-  for (const p of S.peers.values()) { attachTracks(p); applyQuality(p); }
-  $('share').textContent = '■ Parar'; $('share').className = 'btn red hostOnly';
-  if (!S.stream.getAudioTracks().length) toast('Sem áudio do sistema: marque "Compartilhar áudio" na janela de seleção', 4500);
+async function openPicker() {
+  const list = await invoke('list_sources');
+  const item = s => `<div class="src" data-id="${esc(s.id)}" data-title="${esc(s.title)}"><span class="ico">${s.kind === 'monitor' ? '🖥' : '▢'}</span>
+    <div><b>${esc(s.title)}</b>${s.process ? `<small>${esc(s.process)}</small>` : ''}</div></div>`;
+  sheet.innerHTML = `<h2>O que você quer transmitir?</h2><p>Captura nativa do Windows, sem barra de compartilhamento na tela.</p>
+    <label>Telas</label><div class="srcs">${list.filter(s => s.kind === 'monitor').map(item).join('')}</div>
+    <label>Janelas</label><div class="srcs">${list.filter(s => s.kind === 'window').map(item).join('') || '<div class="mute">Nenhuma janela aberta</div>'}</div>
+    <div class="act"><button class="btn ghost" id="x">Cancelar</button></div>`;
+  $('x').onclick = closeModal;
+  sheet.querySelectorAll('.src').forEach(el => el.onclick = async () => {
+    try {
+      await invoke('set_quality', { quality: S.q });
+      await invoke('start_share', { sourceId: el.dataset.id, title: el.dataset.title });
+      S.sharing = el.dataset.title; closeModal();
+      $('ph').textContent = `Transmitindo: ${S.sharing}`; $('ph').hidden = false;
+      $('share').textContent = '■ Parar'; $('share').className = 'btn red hostOnly';
+    } catch (err) { toast(String(err)); }
+  });
+  modal.classList.add('show');
 }
 
 function stopShare() {
-  if (S.stream) S.stream.getTracks().forEach(t => t.stop());
-  S.stream = null; $('video').srcObject = null; $('ph').hidden = false;
-  for (const p of S.peers.values()) attachTracks(p);
+  if (S.sharing) invoke('stop_share').catch(() => {});
+  S.sharing = null;
+  $('ph').textContent = 'Aguardando transmissão…';
   $('share').textContent = '▶ Compartilhar tela'; $('share').className = 'btn pri hostOnly';
 }
-$('share').onclick = () => S.stream ? stopShare() : startShare();
-
-$('mic').onclick = async () => {
-  if (S.micStream) { S.micStream.getTracks().forEach(t => t.stop()); S.micStream = null; $('mic').classList.add('off'); }
-  else {
-    try { S.micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); $('mic').classList.remove('off'); }
-    catch { return toast('Microfone indisponível'); }
-  }
-  for (const p of S.peers.values()) attachTracks(p);
-};
-
-// Qualidade: aplicada no encoder de cada conexão, ao vivo, sem renegociar.
-async function applyQuality(peer, q = peer.q || S.q) {
-  const sender = peer.video; if (!sender) return;
-  const vt = S.stream && S.stream.getVideoTracks()[0];
-  if (vt) {
-    vt.contentHint = q.pri;
-    vt.applyConstraints({ frameRate: { ideal: q.fps, max: q.fps } }).catch(() => {});
-  }
-  const p = sender.getParameters();
-  if (!p.encodings || !p.encodings.length) p.encodings = [{}];
-  const srcH = vt ? (vt.getSettings().height || 1080) : 1080;
-  const e = p.encodings[0];
-  e.maxBitrate = q.br * 1_000_000;
-  e.maxFramerate = q.fps;
-  e.scaleResolutionDownBy = q.res && srcH > q.res ? srcH / q.res : 1;
-  e.networkPriority = e.priority = 'high';
-  // Fluidez: segura o FPS e baixa a resolução sob pressão. Nitidez: o contrário.
-  p.degradationPreference = q.pri === 'motion' ? 'maintain-framerate' : 'maintain-resolution';
-  try { await sender.setParameters(p); } catch (err) { console.warn('setParameters', err); }
-}
-
-function onHostMsg(name, data) {
-  let m; try { m = JSON.parse(data); } catch { return; }
-  const peer = S.peers.get(name); if (!peer) return;
-  if (m.t === 'quality') {
-    const q = { res: +m.res, fps: Math.min(60, +m.fps), pri: m.pri === 'detail' ? 'detail' : 'motion', br: Math.min(40, Math.max(1, +m.br)) };
-    peer.q = q; applyQuality(peer, q); toast(`${name} ajustou a qualidade`);
-  }
-}
+$('share').onclick = () => S.sharing ? stopShare() : openPicker();
 
 // ---------- CONVIDADO ----------
 async function guestStart() {
@@ -316,15 +261,14 @@ $('br').oninput = () => { S.q.br = +$('br').value; $('brv').textContent = S.q.br
 $('br').onchange = qualityChanged;
 
 function qualityChanged() {
-  if (S.role === 'host') for (const p of S.peers.values()) { p.q = null; applyQuality(p); }
+  if (S.role === 'host') invoke('set_quality', { quality: S.q }).catch(err => toast(String(err)));
   if (S.role === 'guest' && S.guestDc && S.guestDc.readyState === 'open') S.guestDc.send(JSON.stringify({ t: 'quality', ...S.q }));
 }
 
 // ---------- sair / tela cheia ----------
 function leave() {
   stopShare();
-  if (S.micStream) { S.micStream.getTracks().forEach(t => t.stop()); S.micStream = null; }
-  for (const p of S.peers.values()) p.pc.close();
+  if (S.role === 'host') invoke('close_room').catch(() => {});
   S.peers.clear();
   if (S.guestPc) S.guestPc.close();
   S.guestPc = S.guestDc = null; S.role = null; S.room = null;
@@ -352,11 +296,12 @@ setInterval(async () => {
   let s = null;
   if (S.role === 'guest' && S.guestPc) { s = S.guestPc._st = await readStats(S.guestPc, S.guestPc._st); }
   if (S.role === 'host') {
-    for (const p of S.peers.values()) { p.last = await readStats(p.pc, p.last); if (p.last.rtt != null) p.rtt = Math.round(p.last.rtt * 1000); }
-    s = [...S.peers.values()].map(p => p.last).sort((a, b) => (b.rtt || 0) - (a.rtt || 0))[0] || null; // pior conexão
-    renderPeers();
+    const n = [...S.peers.values()].filter(p => p.state === 'connected').length;
+    $('connState').textContent = n ? `● ${n} conectado${n > 1 ? 's' : ''}` : 'ninguém conectado';
+    $('connState').style.color = n ? 'var(--good)' : '';
+    return;
   }
-  const pc = S.role === 'guest' ? S.guestPc : [...S.peers.values()][0]?.pc;
+  const pc = S.guestPc;
   $('connState').textContent = pc ? ({ connected: '● direta', connecting: 'conectando…', new: 'aguardando', failed: 'falhou', disconnected: 'instável' }[pc.connectionState] || pc.connectionState) : '—';
   $('connState').style.color = pc && pc.connectionState === 'connected' ? 'var(--good)' : '';
   if (!s) return;
