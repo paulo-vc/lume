@@ -8,7 +8,8 @@ Compartilhamento de tela P2P, portátil (um `.exe`), sem servidor e só por conv
 - **Transmissão (nativa, em Rust):**
   - Captura de tela ou de uma janela específica pelo Windows Graphics Capture (`src-tauri/src/capture.rs`).
     Não aparece a barra "está compartilhando", e no Windows 11 nem a borda amarela.
-  - Vídeo codificado em H.264 (OpenH264 por enquanto; encoder pela placa de vídeo é a próxima etapa).
+  - Vídeo codificado em H.264 pela placa de vídeo via Media Foundation (`src-tauri/src/mf.rs`:
+    NVENC, Quick Sync ou AMF, modo de baixa latência, CBR). Sem GPU compatível, cai para o OpenH264 na CPU.
   - Áudio por aplicativo pelo Process Loopback do Windows (`src-tauri/src/audio.rs`), codificado em Opus
     (pacotes de 10 ms). Três modos: só o som da janela transmitida, PC inteiro menos um programa
     (ex.: Discord, para a call não voltar como eco) ou PC inteiro. Requer Windows 10 2004+.
@@ -47,7 +48,7 @@ Testes nativos (capturam a tela de verdade): `cargo test -- --ignored`.
 
 ## Próximos passos
 
-- Encoder H.264 pela placa de vídeo (Media Foundation: NVENC / QuickSync / AMF).
+- Passar os quadros direto na GPU (textura D3D11 -> encoder), sem a cópia pela CPU.
 
 - Troca automática dos códigos por relays Nostr públicos, cifrada com o segredo do convite.
 - Pipeline nativo opcional (captura WGC + Media Foundation em Rust) para reduzir ainda mais o uso de CPU e RAM.

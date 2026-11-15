@@ -2,6 +2,7 @@
 
 mod audio;
 mod capture;
+mod mf;
 mod room;
 mod stream;
 

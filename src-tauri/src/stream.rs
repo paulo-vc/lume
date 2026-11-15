@@ -361,7 +361,52 @@ struct EncStats {
     height: usize,
     fps: f32,
     kbps: f32,
-    encoder: &'static str,
+    encoder: String,
+}
+
+/// Se o encoder de hardware falhar durante o uso, não tenta de novo nesta sessão.
+static HW_BROKEN: AtomicBool = AtomicBool::new(false);
+
+/// Placa de vídeo (Media Foundation) quando possível; senão OpenH264 na CPU.
+enum VideoEnc {
+    Hw(crate::mf::HwEncoder),
+    Sw(Encoder),
+}
+
+impl VideoEnc {
+    fn new(q: &Quality, w: usize, h: usize, app: &Emit) -> Option<Self> {
+        if !HW_BROKEN.load(Ordering::SeqCst) {
+            match crate::mf::HwEncoder::new(w, h, q.fps, q.br * 1_000_000, q.fps * 3) {
+                Ok(e) => return Some(Self::Hw(e)),
+                Err(err) => {
+                    HW_BROKEN.store(true, Ordering::SeqCst);
+                    (app)("enc-fallback", serde_json::json!(err));
+                }
+            }
+        }
+        make_encoder(q).map(Self::Sw)
+    }
+    fn name(&self) -> String {
+        match self {
+            Self::Hw(e) => format!("{} (GPU)", e.name.trim_end_matches("Encoder").trim_end_matches("h264").trim()),
+            Self::Sw(_) => "OpenH264 (CPU)".into(),
+        }
+    }
+    fn force_idr(&mut self) {
+        match self {
+            Self::Hw(e) => e.force_keyframe(),
+            Self::Sw(e) => e.force_intra_frame(),
+        }
+    }
+    fn encode(&mut self, f: &RawFrame) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Hw(e) => e.encode(&f.bgra).inspect_err(|_| HW_BROKEN.store(true, Ordering::SeqCst)),
+            Self::Sw(e) => {
+                let yuv = YUVBuffer::from_bgra8_source(BgraSliceU8::new(&f.bgra, (f.width, f.height)));
+                e.encode(&yuv).map(|bs| bs.to_vec()).map_err(|x| x.to_string())
+            }
+        }
+    }
 }
 
 fn make_encoder(q: &Quality) -> Option<Encoder> {
@@ -428,7 +473,10 @@ await pc.setRemoteDescription({type:'answer',sdp:a});})()</script>"#;
             let mut buf = vec![];
             let mut tmp = [0u8; 8192];
             loop {
-                let n = s.read(&mut tmp).unwrap();
+                let n = s.read(&mut tmp).unwrap_or(0);
+                if n == 0 && !String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                    return (String::new(), String::new()); // conexão vazia (pré-conexão do navegador)
+                }
                 buf.extend_from_slice(&tmp[..n]);
                 let txt = String::from_utf8_lossy(&buf).to_string();
                 if let Some(h) = txt.find("\r\n\r\n") {
@@ -473,7 +521,8 @@ fn encode_loop(
 ) {
     let mut q = quality.lock().unwrap().clone();
     let mut seen = ver.load(Ordering::SeqCst);
-    let mut enc = make_encoder(&q);
+    let mut enc: Option<VideoEnc> = None;
+    let mut enc_name = String::new();
     let mut last = Instant::now();
     let (mut n, mut bytes, mut window) = (0u32, 0usize, Instant::now());
     let mut dims = (0, 0);
@@ -494,21 +543,30 @@ fn encode_loop(
         if v != seen {
             seen = v;
             q = quality.lock().unwrap().clone();
-            enc = make_encoder(&q);
+            enc = None;
         }
         let f = capture::downscale(&raw, q.res as usize);
         last_raw = Some(raw);
         if (f.width, f.height) != dims {
             dims = (f.width, f.height);
-            enc = make_encoder(&q); // mudança de tamanho (ex.: janela redimensionada)
+            enc = None; // mudança de tamanho (ex.: janela redimensionada)
+        }
+        if enc.is_none() {
+            enc = VideoEnc::new(&q, f.width, f.height, &app);
+            enc_name = enc.as_ref().map(|e| e.name()).unwrap_or_default();
+            idr.store(true, Ordering::SeqCst); // encoder novo começa com quadro-chave
         }
         let Some(e) = enc.as_mut() else { continue };
         if idr.swap(false, Ordering::SeqCst) {
-            e.force_intra_frame();
+            e.force_idr();
         }
-        let yuv = YUVBuffer::from_bgra8_source(BgraSliceU8::new(&f.bgra, (f.width, f.height)));
-        let Ok(bs) = e.encode(&yuv) else { continue };
-        let data = bs.to_vec();
+        let data = match e.encode(&f) {
+            Ok(d) => d,
+            Err(_) => {
+                enc = None; // tenta de novo (já cai para a CPU se a GPU falhou)
+                continue;
+            }
+        };
         if data.is_empty() {
             continue; // quadro pulado pelo controle de taxa
         }
@@ -521,7 +579,7 @@ fn encode_loop(
 
         if window.elapsed() >= Duration::from_secs(1) {
             let s = window.elapsed().as_secs_f32();
-            (app)("enc-stats", serde_json::to_value(EncStats { width: f.width, height: f.height, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: "OpenH264" }).unwrap());
+            (app)("enc-stats", serde_json::to_value(EncStats { width: f.width, height: f.height, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone() }).unwrap());
             n = 0;
             bytes = 0;
             window = Instant::now();
