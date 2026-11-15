@@ -102,3 +102,6 @@ body.host .guestOnly,body.guest .hostOnly,body:not(.host) .hostOnly,body:not(.ho
 .reqcard .who{flex:1;min-width:0}
 .reqcard .who b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .reqcard .who small{color:var(--mute);font-size:11px}
+.peer .pn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.peer .kick{border:0;background:transparent;color:var(--mute);cursor:pointer;width:24px;height:24px;border-radius:8px;font-size:12px;margin-left:6px;flex:none}
+.peer .kick:hover{background:var(--panel);color:#e5484d}

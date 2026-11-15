@@ -72,14 +72,22 @@ function renderPeers() {
   const list = [];
   if (S.role === 'host') {
     list.push({ name: myName() + ' (você)', tag: 'anfitrião' });
-    for (const [n, p] of S.peers) list.push({ name: n, tag: STATE_PT[p.state] || p.state });
+    for (const [n, p] of S.peers) list.push({ name: n, tag: STATE_PT[p.state] || p.state, kick: true });
   } else if (S.role === 'guest') {
     list.push({ name: 'Anfitrião', tag: S.guestPc ? S.guestPc.connectionState : '' }, { name: myName() + ' (você)', tag: '' });
   }
-  $('peers').innerHTML = list.map(p => `<div class="peer"><div class="av">${esc(initials(p.name))}</div>${esc(p.name)}<small>${esc(p.tag)}</small></div>`).join('');
+  $('peers').innerHTML = list.map(p => `<div class="peer"><div class="av">${esc(initials(p.name))}</div><span class="pn">${esc(p.name)}</span><small>${esc(p.tag)}</small>${p.kick ? `<button class="kick" data-kick="${esc(p.name)}" title="Remover da sala">✕</button>` : ''}</div>`).join('');
   const n = S.role === 'host' ? S.peers.size + 1 : S.role ? 2 : 0;
   $('pCount').textContent = `${n} / 8`; $('roomCount').textContent = n;
 }
+
+// Anfitrião remove alguém da sala (libera a vaga; a pessoa precisa pedir para entrar de novo).
+$('peers').onclick = e => {
+  const b = e.target.closest('[data-kick]'); if (!b) return;
+  const name = b.dataset.kick;
+  S.peers.delete(name); renderPeers();
+  invoke('remove_peer', { name }).then(() => toast(`${name} foi removido da sala`)).catch(err => toast(String(err)));
+};
 
 // ---------- modais ----------
 const modal = $('modal'), sheet = $('sheet');
@@ -255,6 +263,8 @@ async function guestStart() {
   pc.addTransceiver('audio', { direction: 'recvonly' });
   preferH264(vt);
   const dc = pc.createDataChannel('ctl');
+  // O canal fecha na hora quando o anfitrião remove a pessoa ou fecha a sala.
+  dc.onclose = () => { if (S.role === 'guest' && S.guestPc === pc) { toast('O anfitrião encerrou a sua conexão', 5000); leave(); } };
   const remote = new MediaStream();
   pc.ontrack = e => {
     remote.addTrack(e.track);

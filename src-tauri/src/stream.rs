@@ -254,8 +254,15 @@ impl Engine {
         let mut sounds = self.audio_out.subscribe();
         tokio::spawn(async move {
             let mut sending = false;
+            // Quem não conecta em 30 s sai da lista (ex.: o convidado desistiu ou a rede bloqueou).
+            let deadline = tokio::time::sleep(Duration::from_secs(30));
+            tokio::pin!(deadline);
             loop {
                 tokio::select! {
+                    _ = &mut deadline, if !sending => {
+                        (app)("peer-state", serde_json::json!([n, "failed"]));
+                        break;
+                    }
                     st = state_rx.recv() => {
                         let Some(st) = st else { break };
                         (app)("peer-state", serde_json::json!([n, st.to_string()]));

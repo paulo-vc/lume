@@ -29,6 +29,8 @@ struct Host {
     pending: HashMap<String, JoinReq>,
     /// respostas já dadas (reenviadas se o convidado repetir o pedido)
     answered: HashMap<String, Vec<u8>>,
+    /// pedidos com o Aceitar em andamento
+    accepting: std::collections::HashSet<String>,
     members: Vec<String>,
 }
 
@@ -92,7 +94,7 @@ async fn create_room(app: AppHandle, st: State<'_, AppState>, name: String) -> R
     let (bus, listener) = listen_requests(app, keys.clone());
     let info = RoomInfo { name: name.clone(), code: code.clone() };
     *st.host.lock().unwrap() =
-        Some(Host { name, code, keys, bus, listener, pending: HashMap::new(), answered: HashMap::new(), members: vec![] });
+        Some(Host { name, code, keys, bus, listener, pending: HashMap::new(), answered: HashMap::new(), accepting: Default::default(), members: vec![] });
     Ok(info)
 }
 
@@ -129,17 +131,24 @@ async fn approve_request(st: State<'_, AppState>, id: String) -> Result<String, 
     let req = {
         let mut g = st.host.lock().unwrap();
         let h = g.as_mut().ok_or("Nenhuma sala aberta")?;
-        let req = h.pending.remove(&id).ok_or("Esse pedido não existe mais")?;
-        let why = if h.members.len() >= room::MAX_MEMBERS {
-            "A sala está cheia"
-        } else if h.members.contains(&req.name) {
-            "Já existe alguém com esse nome na sala"
-        } else {
-            ""
-        };
-        if !why.is_empty() {
-            answer(h, &id, &JoinRes { ok: false, sdp: String::new(), why: why.into() });
-            return Err(why.into());
+        // O pedido fica em `pending` até a resposta sair: o convidado repete o pedido a cada
+        // poucos segundos e, se ele sumisse daqui antes, a repetição viraria um segundo cartão.
+        let mut req = h.pending.get(&id).cloned().ok_or("Esse pedido não existe mais")?;
+        if !h.accepting.insert(id.clone()) {
+            return Err("Esse pedido já está sendo aceito".into());
+        }
+        if h.members.len() >= room::MAX_MEMBERS {
+            h.pending.remove(&id);
+            h.accepting.remove(&id);
+            answer(h, &id, &JoinRes { ok: false, sdp: String::new(), why: "A sala está cheia".into() });
+            return Err("A sala está cheia. Remova alguém para liberar uma vaga.".into());
+        }
+        // Nome repetido não barra ninguém: vira "Nome (2)".
+        let base = req.name.clone();
+        let mut n = 2;
+        while h.members.contains(&req.name) {
+            req.name = format!("{base} ({n})");
+            n += 1;
         }
         h.members.push(req.name.clone());
         req
@@ -148,6 +157,8 @@ async fn approve_request(st: State<'_, AppState>, id: String) -> Result<String, 
     let pc = {
         let mut g = st.host.lock().unwrap();
         let h = g.as_mut().ok_or("Nenhuma sala aberta")?;
+        h.pending.remove(&id);
+        h.accepting.remove(&id);
         match made {
             Ok((pc, sdp)) => {
                 answer(h, &id, &JoinRes { ok: true, sdp, why: String::new() });
@@ -167,7 +178,7 @@ async fn approve_request(st: State<'_, AppState>, id: String) -> Result<String, 
 #[tauri::command]
 fn deny_request(st: State<AppState>, id: String) {
     if let Some(h) = st.host.lock().unwrap().as_mut() {
-        if h.pending.remove(&id).is_some() {
+        if !h.accepting.contains(&id) && h.pending.remove(&id).is_some() {
             answer(h, &id, &JoinRes { ok: false, sdp: String::new(), why: "O anfitrião recusou a entrada".into() });
         }
     }
