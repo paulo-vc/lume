@@ -1,6 +1,7 @@
 //! Transmissão nativa: captura -> H.264 -> WebRTC (uma conexão por convidado).
 //! O convidado continua recebendo pelo WebRTC do WebView2 (decodificação por hardware).
 
+use crate::audio::{self, AudioSel, EncodedAudio};
 use crate::capture::{self, RawFrame};
 use bytes::Bytes;
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, UsageType};
@@ -62,11 +63,14 @@ pub struct Engine {
     frames: broadcast::Sender<EncodedFrame>,
     capture: Mutex<Option<(capture::Control, Arc<AtomicBool>)>>,
     pub source_title: Mutex<Option<String>>,
+    audio_out: broadcast::Sender<EncodedAudio>,
+    audio_stop: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl Engine {
     pub fn new(app: Emit) -> Self {
         let (frames, _) = broadcast::channel(8);
+        let (audio_out, _) = broadcast::channel(64);
         Self {
             app,
             quality: Arc::new(Mutex::new(Quality::default())),
@@ -75,6 +79,8 @@ impl Engine {
             frames,
             capture: Mutex::new(None),
             source_title: Mutex::new(None),
+            audio_out,
+            audio_stop: Mutex::new(None),
         }
     }
 
@@ -115,7 +121,25 @@ impl Engine {
         Ok(())
     }
 
+    /// Troca a fonte de áudio (pode ser feito durante a transmissão).
+    pub fn set_audio(&self, sel: &AudioSel) -> Result<(), String> {
+        self.stop_audio();
+        if sel.mode == "none" {
+            return Ok(());
+        }
+        let stop = audio::start(sel, self.audio_out.clone())?;
+        *self.audio_stop.lock().unwrap() = Some(stop);
+        Ok(())
+    }
+
+    pub fn stop_audio(&self) {
+        if let Some(s) = self.audio_stop.lock().unwrap().take() {
+            s.store(true, Ordering::SeqCst);
+        }
+    }
+
     pub fn stop_share(&self) {
+        self.stop_audio();
         if let Some((control, stop)) = self.capture.lock().unwrap().take() {
             stop.store(true, Ordering::SeqCst);
             let _ = control.stop();
@@ -151,7 +175,7 @@ impl Engine {
             payload_type: 111,
             ..Default::default()
         };
-        me.register_codec(opus, RtpCodecKind::Audio).map_err(|x| e(&x))?;
+        me.register_codec(opus.clone(), RtpCodecKind::Audio).map_err(|x| e(&x))?;
         let registry = register_default_interceptors(Registry::new(), &mut me).map_err(|x| e(&x))?;
         let config = RTCConfigurationBuilder::new()
             .with_ice_servers(vec![RTCIceServer {
@@ -197,9 +221,28 @@ impl Engine {
             .map_err(|x| e(&x))?,
         );
 
+        let atrack = Arc::new(
+            TrackLocalStaticSample::new(
+                Instant::now(),
+                MediaStreamTrack::new(
+                    "lume".into(),
+                    "lume-audio".into(),
+                    "lume-audio".into(),
+                    RtpCodecKind::Audio,
+                    vec![RTCRtpEncodingParameters {
+                        rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(rand::random::<u32>()), ..Default::default() },
+                        codec: opus.rtp_codec.clone(),
+                        ..Default::default()
+                    }],
+                ),
+            )
+            .map_err(|x| e(&x))?,
+        );
+
         let offer = RTCSessionDescription::offer(offer_sdp).map_err(|x| e(&x))?;
         pc.set_remote_description(offer).await.map_err(|x| e(&x))?;
         let sender = pc.add_track(track.clone() as Arc<dyn TrackLocal>).await.map_err(|x| e(&x))?;
+        let asender = pc.add_track(atrack.clone() as Arc<dyn TrackLocal>).await.map_err(|x| e(&x))?;
         let answer = pc.create_answer(None).await.map_err(|x| e(&x))?;
         pc.set_local_description(answer).await.map_err(|x| e(&x))?;
         let _ = tokio::time::timeout(Duration::from_secs(5), gather_rx.recv()).await;
@@ -208,6 +251,7 @@ impl Engine {
         // Estado da conexão -> interface; ao conectar começa a enviar os quadros.
         let (engine, app, n) = (self.clone(), self.app.clone(), name.clone());
         let mut frames = self.frames.subscribe();
+        let mut sounds = self.audio_out.subscribe();
         tokio::spawn(async move {
             let mut sending = false;
             loop {
@@ -233,6 +277,19 @@ impl Engine {
                                     .await;
                             }
                             Err(broadcast::error::RecvError::Lagged(_)) => engine.request_keyframe(),
+                            Err(broadcast::error::RecvError::Closed) => break,
+                            _ => {}
+                        }
+                    }
+                    a = sounds.recv() => {
+                        match a {
+                            Ok(a) if sending => {
+                                let pt = asender.get_parameters().await.ok().and_then(|p| p.rtp_parameters.codecs.first().map(|c| c.payload_type)).unwrap_or(111);
+                                let Some(ssrc) = atrack.ssrcs().await.first().copied() else { continue };
+                                let _ = atrack.sample_writer(ssrc, pt)
+                                    .write_sample(&Sample { data: a.data, duration: a.duration, ..Sample::new(Instant::now()) })
+                                    .await;
+                            }
                             Err(broadcast::error::RecvError::Closed) => break,
                             _ => {}
                         }
@@ -352,24 +409,52 @@ mod tests {
     }
 
     /// Teste de ponta a ponta com um navegador real como convidado:
-    /// lê a oferta de %TEMP%\lume-offer.txt, grava a resposta em %TEMP%\lume-answer.txt
-    /// e transmite a tela principal por 40 s.
+    /// abra http://127.0.0.1:8765/ no navegador; a página manda a oferta e recebe a resposta.
+    /// Transmite a tela principal + áudio do PC por 40 s.
     #[test]
     #[ignore]
     fn e2e_with_browser() {
-        let dir = std::env::temp_dir();
-        let offer = loop {
-            if let Ok(s) = std::fs::read_to_string(dir.join("lume-offer.txt")) {
-                if let Ok(sdp) = serde_json::from_str::<String>(s.trim()) { break sdp; }
+        use std::io::{Read, Write};
+        const PAGE: &str = r#"<!doctype html><video id=v autoplay playsinline muted></video><script>
+(async()=>{const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});window.pc=pc;
+pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});pc.createDataChannel('ctl');
+const ms=new MediaStream();pc.ontrack=e=>{ms.addTrack(e.track);v.srcObject=ms};
+await pc.setLocalDescription(await pc.createOffer());
+await new Promise(r=>{pc.onicegatheringstatechange=()=>pc.iceGatheringState==='complete'&&r();setTimeout(r,4000)});
+const a=await (await fetch('/offer',{method:'POST',body:pc.localDescription.sdp})).text();
+await pc.setRemoteDescription({type:'answer',sdp:a});})()</script>"#;
+        let srv = std::net::TcpListener::bind("127.0.0.1:8765").unwrap();
+        let read_req = |s: &mut std::net::TcpStream| -> (String, String) {
+            let mut buf = vec![];
+            let mut tmp = [0u8; 8192];
+            loop {
+                let n = s.read(&mut tmp).unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+                let txt = String::from_utf8_lossy(&buf).to_string();
+                if let Some(h) = txt.find("\r\n\r\n") {
+                    let len = txt[..h].lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                    if buf.len() >= h + 4 + len || n == 0 {
+                        return (txt[..h].lines().next().unwrap_or("").to_string(), txt[h + 4..].to_string());
+                    }
+                }
             }
-            std::thread::sleep(Duration::from_millis(300));
+        };
+        let (mut conn, offer) = loop {
+            let (mut c, _) = srv.accept().unwrap();
+            let (line, body) = read_req(&mut c);
+            if line.starts_with("POST /offer") {
+                break (c, body);
+            }
+            let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PAGE}", PAGE.len());
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
             let engine = Arc::new(Engine::new(Arc::new(|ev: &str, v: serde_json::Value| println!("[{ev}] {v}"))));
             engine.start_share("m:1", "Tela 1".into()).unwrap();
+            engine.set_audio(&AudioSel { mode: "all".into(), pid: 0 }).unwrap();
             let (pc, answer) = engine.accept_guest("Teste".into(), offer).await.unwrap();
-            std::fs::write(dir.join("lume-answer.txt"), answer).unwrap();
+            let _ = write!(conn, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+            drop(conn);
             tokio::time::sleep(Duration::from_secs(40)).await;
             engine.stop_share();
             let _ = pc.close().await;

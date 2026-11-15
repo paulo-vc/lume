@@ -9,6 +9,9 @@ Compartilhamento de tela P2P, portátil (um `.exe`), sem servidor e só por conv
   - Captura de tela ou de uma janela específica pelo Windows Graphics Capture (`src-tauri/src/capture.rs`).
     Não aparece a barra "está compartilhando", e no Windows 11 nem a borda amarela.
   - Vídeo codificado em H.264 (OpenH264 por enquanto; encoder pela placa de vídeo é a próxima etapa).
+  - Áudio por aplicativo pelo Process Loopback do Windows (`src-tauri/src/audio.rs`), codificado em Opus
+    (pacotes de 10 ms). Três modos: só o som da janela transmitida, PC inteiro menos um programa
+    (ex.: Discord, para a call não voltar como eco) ou PC inteiro. Requer Windows 10 2004+.
   - Envio por WebRTC nativo (`webrtc-rs`, `src-tauri/src/stream.rs`), uma conexão por convidado.
 - **Quem assiste:** recebe pelo WebRTC do WebView2, com decodificação pela placa de vídeo e buffer curto (40 ms).
 - **Salas e convites:** `src-tauri/src/room.rs`. Convite com segredo de 256 bits que expira em 15 min.
@@ -44,7 +47,6 @@ Testes nativos (capturam a tela de verdade): `cargo test -- --ignored`.
 
 ## Próximos passos
 
-- Áudio por janela (Process Loopback do Windows) e opção "PC inteiro menos a call".
 - Encoder H.264 pela placa de vídeo (Media Foundation: NVENC / QuickSync / AMF).
 
 - Troca automática dos códigos por relays Nostr públicos, cifrada com o segredo do convite.

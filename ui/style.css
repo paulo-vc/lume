@@ -90,3 +90,7 @@ textarea.field{height:84px;word-break:break-all}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 body.host .guestOnly,body.guest .hostOnly,body:not(.host) .hostOnly,body:not(.host):not(.guest) .inRoom,body:not(.guest) .guestOnly{display:none!important}
 @media(max-width:1000px){.side{display:none}.grid{grid-template-columns:1fr}}
+.src.sel{border-color:var(--ink,currentColor);box-shadow:0 0 0 1px var(--mute)}
+.audio{display:flex;gap:8px;flex-wrap:wrap}
+.audio select{flex:1;min-width:180px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:inherit;font:inherit;font-size:13px}
+#aHint{font-size:12px;margin-top:6px;min-height:16px}

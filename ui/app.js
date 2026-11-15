@@ -175,26 +175,60 @@ function syncQualityUI(q) {
 }
 
 async function openPicker() {
-  const list = await invoke('list_sources');
-  const item = s => `<div class="src" data-id="${esc(s.id)}" data-title="${esc(s.title)}"><span class="ico">${s.kind === 'monitor' ? '🖥' : '▢'}</span>
+  const [list, procs] = await Promise.all([invoke('list_sources'), invoke('list_processes').catch(() => [])]);
+  const item = s => `<div class="src" data-id="${esc(s.id)}" data-title="${esc(s.title)}" data-pid="${s.pid || 0}" data-proc="${esc(s.process || '')}"><span class="ico">${s.kind === 'monitor' ? '🖥' : '▢'}</span>
     <div><b>${esc(s.title)}</b>${s.process ? `<small>${esc(s.process)}</small>` : ''}</div></div>`;
+  const call = procs.find(p => /^(discord|discordptb|discordcanary|teamspeak|ts3client_win64|skype|ms-teams|teams|zoom|whatsapp)\.exe$/i.test(p.name));
   sheet.innerHTML = `<h2>O que você quer transmitir?</h2><p>Captura nativa do Windows, sem barra de compartilhamento na tela.</p>
     <label>Telas</label><div class="srcs">${list.filter(s => s.kind === 'monitor').map(item).join('')}</div>
     <label>Janelas</label><div class="srcs">${list.filter(s => s.kind === 'window').map(item).join('') || '<div class="mute">Nenhuma janela aberta</div>'}</div>
-    <div class="act"><button class="btn ghost" id="x">Cancelar</button></div>`;
+    <label>Áudio</label>
+    <div class="audio">
+      <select id="aMode">
+        <option value="app" id="aApp">Só o áudio da janela escolhida</option>
+        <option value="except">PC inteiro, menos um programa (a call)</option>
+        <option value="all">PC inteiro</option>
+        <option value="none">Sem áudio</option>
+      </select>
+      <select id="aEx">${procs.map(p => `<option value="${p.pid}" ${call && p.pid === call.pid ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+    </div>
+    <div class="mute" id="aHint"></div>
+    <div class="act"><button class="btn ghost" id="x">Cancelar</button><button class="btn pri" id="go" disabled>Transmitir</button></div>`;
   $('x').onclick = closeModal;
-  sheet.querySelectorAll('.src').forEach(el => el.onclick = async () => {
+  let pick = null;
+  const sync = () => {
+    const win = pick && pick.dataset.id.startsWith('w:');
+    $('aApp').disabled = !win;
+    if (!win && $('aMode').value === 'app') $('aMode').value = call ? 'except' : 'all';
+    $('aEx').hidden = $('aMode').value !== 'except';
+    const m = $('aMode').value;
+    $('aHint').textContent = m === 'app' ? `Só o som de ${pick.dataset.proc || 'este programa'} vai junto. A call não volta como eco.`
+      : m === 'except' ? 'Tudo que toca no PC vai junto, menos o programa escolhido.'
+      : m === 'all' ? 'Atenção: se você estiver numa call, o pessoal vai se ouvir.' : '';
+  };
+  sheet.querySelectorAll('.src').forEach(el => el.onclick = () => {
+    sheet.querySelectorAll('.src').forEach(x => x.classList.toggle('sel', x === el));
+    pick = el; $('go').disabled = false;
+    $('aMode').value = el.dataset.id.startsWith('w:') ? 'app' : (call ? 'except' : 'all');
+    sync();
+  });
+  $('aMode').onchange = sync;
+  $('go').onclick = async () => {
+    const mode = $('aMode').value;
+    const pid = mode === 'app' ? Number(pick.dataset.pid) : mode === 'except' ? Number($('aEx').value) : 0;
     try {
       await invoke('set_quality', { quality: S.q });
-      await invoke('start_share', { sourceId: el.dataset.id, title: el.dataset.title });
-      S.sharing = el.dataset.title; closeModal();
+      await invoke('start_share', { sourceId: pick.dataset.id, title: pick.dataset.title });
+      try { await invoke('set_audio', { sel: { mode, pid } }); }
+      catch (err) { toast('Vídeo ok, mas o áudio falhou: ' + err); }
+      S.sharing = pick.dataset.title; closeModal();
       $('ph').textContent = `Transmitindo: ${S.sharing}`; $('ph').hidden = false;
       $('share').textContent = '■ Parar'; $('share').className = 'btn red hostOnly';
     } catch (err) { toast(String(err)); }
-  });
+  };
+  sync();
   modal.classList.add('show');
 }
-
 function stopShare() {
   if (S.sharing) invoke('stop_share').catch(() => {});
   S.sharing = null;

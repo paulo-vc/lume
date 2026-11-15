@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod capture;
 mod room;
 mod stream;
@@ -125,6 +126,16 @@ fn start_share(st: State<AppState>, source_id: String, title: String) -> Result<
 }
 
 #[tauri::command]
+fn list_processes() -> Vec<audio::Proc> {
+    audio::list_processes()
+}
+
+#[tauri::command]
+fn set_audio(st: State<AppState>, sel: audio::AudioSel) -> Result<(), String> {
+    st.engine.set_audio(&sel)
+}
+
+#[tauri::command]
 fn stop_share(st: State<AppState>) {
     st.engine.stop_share();
 }
@@ -183,6 +194,8 @@ fn main() {
             list_sources,
             start_share,
             stop_share,
+            list_processes,
+            set_audio,
             set_quality,
             make_join_request,
             open_reply
