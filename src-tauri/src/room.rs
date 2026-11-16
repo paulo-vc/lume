@@ -93,6 +93,9 @@ pub struct JoinReq {
     pub id: String,
     pub name: String,
     pub sdp: String,
+    /// foto de perfil (data URL pequena) ou vazio
+    #[serde(default)]
+    pub av: String,
 }
 
 /// Resposta (anfitrião -> convidado).
@@ -128,7 +131,7 @@ mod tests {
     #[test]
     fn seal_open_and_wrong_code() {
         let k = Keys::from_code("K7QM-2XPD-9RTA").unwrap();
-        let req = JoinReq { id: new_id(), name: "Ana".into(), sdp: "v=0 offer".repeat(200) };
+        let req = JoinReq { id: new_id(), name: "Ana".into(), sdp: "v=0 offer".repeat(200), av: String::new() };
         let sealed = k.seal(&req);
         let back: JoinReq = k.open(&sealed).unwrap();
         assert_eq!(back.sdp, req.sdp);

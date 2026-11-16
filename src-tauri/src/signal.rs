@@ -99,7 +99,7 @@ mod tests {
         println!("relays no ar: anfitrião {}, convidado {}", host.online.load(Ordering::SeqCst), guest.online.load(Ordering::SeqCst));
 
         let t = std::time::Instant::now();
-        guest.publish(&keys.requests(), &keys.seal(&JoinReq { id: id.clone(), name: "Ana".into(), sdp: "x".repeat(9000) }));
+        guest.publish(&keys.requests(), &keys.seal(&JoinReq { id: id.clone(), name: "Ana".into(), sdp: "x".repeat(9000), av: String::new() }));
         let got = tokio::time::timeout(Duration::from_secs(10), host_rx.recv()).await.expect("pedido não chegou").unwrap();
         let req: JoinReq = keys.open(&got).expect("pedido não abriu");
         assert_eq!(req.name, "Ana");

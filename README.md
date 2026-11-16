@@ -13,8 +13,18 @@ Compartilhamento de tela P2P, portátil (um `.exe`), sem conta e só entra quem 
   - Áudio por aplicativo pelo Process Loopback do Windows (`src-tauri/src/audio.rs`), codificado em Opus
     (pacotes de 10 ms). Três modos: só o som da janela transmitida, PC inteiro menos um programa
     (ex.: Discord, para a call não voltar como eco) ou PC inteiro. Requer Windows 10 2004+.
-  - Envio por WebRTC nativo (`webrtc-rs`, `src-tauri/src/stream.rs`), uma conexão por convidado.
+    O Windows só exclui um programa por captura; no modo "menos um programa" o Lume captura cada
+    programa que está tocando e mistura, deixando de fora a call e o próprio Lume (senão as telas
+    que você assiste voltariam para a sala).
+  - Envio por WebRTC nativo (`webrtc-rs`, `src-tauri/src/stream.rs`), uma conexão por pessoa que assiste.
 - **Quem assiste:** recebe pelo WebRTC do WebView2, com decodificação pela placa de vídeo e buffer curto (40 ms).
+- **Todos podem transmitir:** cada convidado mantém uma conexão com o anfitrião (tela do anfitrião +
+  canal de controle). Quando outro participante transmite, quem assiste abre uma conexão direta com
+  ele; a oferta e a resposta passam pelo canal de controle, com o anfitrião repassando. As telas
+  aparecem numa grade: clique para destacar uma (as outras vão para a faixa de baixo), duplo clique
+  para tela cheia, volume por tela.
+- **Pedidos e perfil:** pedidos de entrada viram um aviso e ficam na aba Pedidos até serem aceitos,
+  recusados ou a pessoa desistir. A foto de perfil é reduzida para 96 px e viaja cifrada no pedido.
 - **Salas por código:** `src-tauri/src/room.rs`. Cada sala tem um código de 12 caracteres
   (ex.: `K7QM-2XPD-9RTA`, ~60 bits). Do código saem o endereço do ponto de encontro e a chave
   ChaCha20-Poly1305 que cifra e autentica o pedido de entrada e a resposta. Garante:
@@ -52,5 +62,4 @@ Testes nativos (capturam a tela de verdade): `cargo test -- --ignored`.
 
 - Passar os quadros direto na GPU (textura D3D11 -> encoder), sem a cópia pela CPU.
 
-- Pipeline nativo opcional (captura WGC + Media Foundation em Rust) para reduzir ainda mais o uso de CPU e RAM.
 - Modo IP:porta direto para redes onde o STUN não basta.

@@ -26,7 +26,7 @@ struct Host {
     bus: Arc<Bus>,
     listener: tokio::task::JoinHandle<()>,
     /// pedidos esperando o anfitrião aceitar ou recusar
-    pending: HashMap<String, JoinReq>,
+    pending: HashMap<String, (JoinReq, Instant)>,
     /// respostas já dadas (reenviadas se o convidado repetir o pedido)
     answered: HashMap<String, Vec<u8>>,
     /// pedidos com o Aceitar em andamento
@@ -73,15 +73,22 @@ fn listen_requests(app: AppHandle, keys: Keys) -> (Arc<Bus>, tokio::task::JoinHa
                 h.bus.publish(&keys.answer(&req.id), ans);
                 continue;
             }
-            if h.pending.contains_key(&req.id) || h.pending.len() >= 16 || req.id.len() > 32 {
+            if let Some(p) = h.pending.get_mut(&req.id) {
+                p.1 = Instant::now(); // o convidado continua esperando
                 continue;
+            }
+            if h.pending.len() >= 16 || req.id.len() > 32 {
+                continue;
+            }
+            if req.av.len() > 24_000 || !req.av.starts_with("data:image/") {
+                req.av.clear();
             }
             req.name = req.name.trim().chars().take(32).collect();
             if req.name.is_empty() {
                 req.name = "Convidado".into();
             }
-            let _ = app.emit("join-request", serde_json::json!({ "id": req.id, "name": req.name }));
-            h.pending.insert(req.id.clone(), req);
+            let _ = app.emit("join-request", serde_json::json!({ "id": req.id, "name": req.name, "av": req.av }));
+            h.pending.insert(req.id.clone(), (req, Instant::now()));
         }
     });
     (bus, task)
@@ -133,7 +140,7 @@ async fn approve_request(st: State<'_, AppState>, id: String) -> Result<String, 
         let h = g.as_mut().ok_or("Nenhuma sala aberta")?;
         // O pedido fica em `pending` até a resposta sair: o convidado repete o pedido a cada
         // poucos segundos e, se ele sumisse daqui antes, a repetição viraria um segundo cartão.
-        let mut req = h.pending.get(&id).cloned().ok_or("Esse pedido não existe mais")?;
+        let mut req = h.pending.get(&id).map(|p| p.0.clone()).ok_or("Esse pedido não existe mais")?;
         if !h.accepting.insert(id.clone()) {
             return Err("Esse pedido já está sendo aceito".into());
         }
@@ -184,8 +191,46 @@ fn deny_request(st: State<AppState>, id: String) {
     }
 }
 
+/// Pedidos que ainda estão valendo. Quem parou de repetir o pedido (desistiu) sai da lista.
+#[tauri::command]
+fn list_requests(st: State<AppState>) -> Vec<String> {
+    let mut g = st.host.lock().unwrap();
+    let Some(h) = g.as_mut() else { return vec![] };
+    let accepting = h.accepting.clone();
+    h.pending.retain(|id, p| accepting.contains(id) || p.1.elapsed() < Duration::from_secs(15));
+    h.pending.keys().cloned().collect()
+}
+
+/// Recado pelo canal de controle de um convidado (só o anfitrião tem esses canais).
+#[tauri::command]
+async fn ctl_send(st: State<'_, AppState>, name: String, text: String) -> Result<(), String> {
+    st.engine.ctl_send(&name, &text).await
+}
+
+/// Outro participante quer assistir a minha tela: abre uma conexão direta só para ele.
+#[tauri::command]
+async fn accept_viewer(st: State<'_, AppState>, name: String, offer_sdp: String) -> Result<String, String> {
+    if let Some(old) = st.peers.lock().await.remove(&name) {
+        let _ = old.close().await;
+    }
+    let (pc, sdp) = st.engine.accept_guest(name.clone(), offer_sdp).await?;
+    st.peers.lock().await.insert(name, pc);
+    Ok(sdp)
+}
+
+/// Convidado parou de transmitir ou saiu: fecha as conexões de quem assistia.
+#[tauri::command]
+async fn drop_viewers(st: State<'_, AppState>) -> Result<(), String> {
+    let peers: Vec<_> = st.peers.lock().await.drain().map(|(_, p)| p).collect();
+    for p in peers {
+        let _ = p.close().await;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn remove_peer(st: State<'_, AppState>, name: String) -> Result<(), String> {
+    st.engine.ctl_forget(&name);
     if let Some(pc) = st.peers.lock().await.remove(&name) {
         let _ = pc.close().await;
     }
@@ -198,6 +243,7 @@ async fn remove_peer(st: State<'_, AppState>, name: String) -> Result<(), String
 #[tauri::command]
 async fn close_room(st: State<'_, AppState>) -> Result<(), String> {
     st.engine.stop_share();
+    st.engine.ctl_clear();
     let peers: Vec<_> = st.peers.lock().await.drain().map(|(_, p)| p).collect();
     for p in peers {
         let _ = p.close().await;
@@ -245,9 +291,9 @@ fn set_quality(st: State<AppState>, quality: Quality) {
 
 /// Manda o pedido de entrada pelo relay e espera o anfitrião aceitar. Devolve a resposta SDP.
 #[tauri::command]
-async fn join_room(st: State<'_, AppState>, code: String, name: String, offer_sdp: String) -> Result<String, String> {
+async fn join_room(st: State<'_, AppState>, code: String, name: String, av: String, offer_sdp: String) -> Result<String, String> {
     let keys = Keys::from_code(&code)?;
-    let req = JoinReq { id: room::new_id(), name: name.chars().take(32).collect(), sdp: offer_sdp };
+    let req = JoinReq { id: room::new_id(), name: name.chars().take(32).collect(), sdp: offer_sdp, av };
     let (bus, mut rx) = Bus::start(keys.answer(&req.id));
     let cancel = Arc::new(Notify::new());
     *st.guest_cancel.lock().unwrap() = Some(cancel.clone());
@@ -306,6 +352,10 @@ fn main() {
             approve_request,
             deny_request,
             remove_peer,
+            list_requests,
+            ctl_send,
+            accept_viewer,
+            drop_viewers,
             close_room,
             list_sources,
             start_share,

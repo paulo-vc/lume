@@ -37,8 +37,8 @@ pub struct Proc {
     pub name: String,
 }
 
-/// Processos "raiz" de cada programa (pai não tem o mesmo nome), um por nome de executável.
-pub fn list_processes() -> Vec<Proc> {
+/// (pid, pid do pai, nome do executável) de tudo que está rodando.
+fn snapshot() -> Vec<(u32, u32, String)> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::*;
     let mut all: Vec<(u32, u32, String)> = vec![];
@@ -56,6 +56,12 @@ pub fn list_processes() -> Vec<Proc> {
         }
         let _ = CloseHandle(snap);
     }
+    all
+}
+
+/// Processos "raiz" de cada programa (pai não tem o mesmo nome), um por nome de executável.
+pub fn list_processes() -> Vec<Proc> {
+    let all = snapshot();
     let names: HashMap<u32, String> = all.iter().map(|(p, _, n)| (*p, n.to_lowercase())).collect();
     let me = std::process::id();
     let mut seen = std::collections::HashSet::new();
@@ -75,23 +81,28 @@ pub fn list_processes() -> Vec<Proc> {
 
 /// Inicia a captura numa thread própria. Devolve a flag para parar.
 pub fn start(sel: &AudioSel, out: broadcast::Sender<EncodedAudio>) -> Result<Arc<AtomicBool>, String> {
+    let me = std::process::id();
     let (pid, include) = match sel.mode.as_str() {
         "app" => (sel.pid, true),
         "except" => (sel.pid, false),
-        // PC inteiro: exclui o próprio Lume (que não toca nada no anfitrião).
-        "all" => (std::process::id(), false),
+        // PC inteiro: exclui o próprio Lume, senão as telas que você assiste voltariam para a sala.
+        "all" => (me, false),
         _ => return Err("sem áudio".into()),
     };
     if pid == 0 {
         return Err("Escolha um aplicativo para o áudio".into());
     }
+    let mix = sel.mode == "except";
     let stop = Arc::new(AtomicBool::new(false));
     let s2 = stop.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::Builder::new()
         .name("lume-audio".into())
         .spawn(move || {
-            if let Err(e) = run(pid, include, out, s2, &ready_tx) {
+            // O Windows só deixa excluir UM programa por captura. Para tirar a call E o próprio
+            // Lume, captura-se cada programa que está tocando e mistura-se o resto.
+            let r = if mix { run_mix(vec![pid, me], out, s2, &ready_tx) } else { run(pid, include, out, s2, &ready_tx) };
+            if let Err(e) = r {
                 let _ = ready_tx.send(Err(e));
             }
         })
@@ -182,6 +193,150 @@ fn run(
     Ok(())
 }
 
+/// Processos com sessão de áudio aberta em qualquer saída de som.
+fn session_pids() -> Vec<u32> {
+    let mut out = vec![];
+    let Ok(en) = wasapi::DeviceEnumerator::new() else { return out };
+    let Ok(devs) = en.get_device_collection(Direction::Render) else { return out };
+    for d in devs.into_iter().flatten() {
+        let Ok(list) = d.get_iaudiosessionmanager().and_then(|m| m.get_audiosessionenumerator()) else { continue };
+        for i in 0..list.get_count().unwrap_or(0) {
+            if let Ok(pid) = list.get_session(i).and_then(|s| s.get_process_id()) {
+                out.push(pid);
+            }
+        }
+    }
+    out
+}
+
+/// Quais programas capturar: todos que têm áudio, menos os excluídos (e os filhos deles).
+/// Se pai e filho têm áudio, fica só o pai (a captura dele já inclui os filhos).
+fn mix_targets(excluded: &[u32]) -> Vec<u32> {
+    let parent: HashMap<u32, u32> = snapshot().into_iter().map(|(p, pp, _)| (p, pp)).collect();
+    let pids: std::collections::HashSet<u32> = session_pids().into_iter().filter(|p| *p > 4 && parent.contains_key(p)).collect();
+    let ancestors = |p: u32| {
+        let mut v = vec![];
+        let mut cur = p;
+        while let Some(&pp) = parent.get(&cur) {
+            if pp == 0 || pp == cur || v.len() > 32 {
+                break;
+            }
+            v.push(pp);
+            cur = pp;
+        }
+        v
+    };
+    pids.iter()
+        .copied()
+        .filter(|&p| {
+            let up = ancestors(p);
+            !excluded.contains(&p) && !up.iter().any(|a| excluded.contains(a) || pids.contains(a))
+        })
+        .collect()
+}
+
+struct Source {
+    pid: u32,
+    client: AudioClient,
+    cap: wasapi::AudioCaptureClient,
+    _event: wasapi::Handle,
+    q: VecDeque<u8>,
+    primed: bool,
+}
+
+fn open_source(pid: u32) -> Result<Source, wasapi::WasapiError> {
+    let fmt = WaveFormat::new(32, 32, SampleType::Float, RATE, CH, None);
+    let mut client = AudioClient::new_application_loopback_client(pid, true)?;
+    client.initialize_client(&fmt, Direction::Capture, StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 200_000 }, None)?;
+    let _event = client.set_get_eventhandle()?;
+    let cap = client.get_audiocaptureclient()?;
+    client.start_stream()?;
+    Ok(Source { pid, client, cap, _event, q: VecDeque::new(), primed: false })
+}
+
+/// "PC inteiro menos X": mistura o áudio de cada programa que não está na lista de excluídos.
+fn run_mix(
+    excluded: Vec<u32>,
+    out: broadcast::Sender<EncodedAudio>,
+    stop: Arc<AtomicBool>,
+    ready: &std::sync::mpsc::Sender<Result<(), String>>,
+) -> Result<(), String> {
+    let _ = wasapi::initialize_mta();
+    let enc = new_encoder()?;
+    let _ = ready.send(Ok(()));
+
+    let chunk = FRAME * 4 * CH;
+    let mut srcs: Vec<Source> = vec![];
+    let mut pcm = vec![0f32; FRAME * CH];
+    let mut pkt = vec![0u8; 4000];
+    let start = Instant::now();
+    let mut sent: u64 = 0;
+    let mut scanned: Option<Instant> = None;
+    while !stop.load(Ordering::SeqCst) {
+        // Programas abrem e fecham: confere a lista uma vez por segundo.
+        if scanned.map_or(true, |t| t.elapsed() > Duration::from_secs(1)) {
+            scanned = Some(Instant::now());
+            let want = mix_targets(&excluded);
+            srcs.retain(|s| want.contains(&s.pid));
+            for pid in want {
+                if srcs.len() < 24 && !srcs.iter().any(|s| s.pid == pid) {
+                    if let Ok(s) = open_source(pid) {
+                        srcs.push(s);
+                    }
+                }
+            }
+        }
+        for s in srcs.iter_mut() {
+            for _ in 0..8 {
+                let before = s.q.len();
+                if s.cap.read_from_device_to_deque(&mut s.q).is_err() || s.q.len() == before {
+                    break;
+                }
+            }
+            while s.q.len() > chunk * 8 {
+                s.q.drain(..chunk); // acumulou atraso: descarta
+            }
+        }
+        let due = (start.elapsed().as_micros() as u64 * RATE as u64 / 1_000_000) / FRAME as u64;
+        if sent + 6 < due {
+            sent = due - 1; // a thread ficou parada: não tenta recuperar o tempo perdido
+        }
+        while sent < due {
+            pcm.fill(0.0);
+            for s in srcs.iter_mut() {
+                // Espera juntar 20 ms antes de começar a tocar uma fonte, para ela não picotar.
+                if !s.primed && s.q.len() >= chunk * 2 {
+                    s.primed = true;
+                }
+                if !s.primed {
+                    continue;
+                }
+                if s.q.len() < chunk {
+                    s.primed = false;
+                    continue;
+                }
+                for (i, o) in pcm.iter_mut().enumerate() {
+                    *o += f32::from_le_bytes([s.q[i * 4], s.q[i * 4 + 1], s.q[i * 4 + 2], s.q[i * 4 + 3]]);
+                }
+                s.q.drain(..chunk);
+            }
+            for o in pcm.iter_mut() {
+                *o = o.clamp(-1.0, 1.0);
+            }
+            let n = unsafe { opus::opus_encode_float(enc.0, pcm.as_ptr(), FRAME as i32, pkt.as_mut_ptr(), pkt.len() as i32) };
+            sent += 1;
+            if n > 0 {
+                let _ = out.send(EncodedAudio { data: Bytes::copy_from_slice(&pkt[..n as usize]), duration: Duration::from_millis(10) });
+            }
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    for s in &srcs {
+        let _ = s.client.stop_stream();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +361,20 @@ mod tests {
         }
         println!("{n} pacotes Opus em 2 s, {big} com som");
         assert!(n > 100, "poucos pacotes: {n}");
+    }
+
+    /// Mostra quais programas a mistura capturaria agora. `cargo test mix_targets -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn mix_targets_now() {
+        let _ = wasapi::initialize_mta();
+        let names: HashMap<u32, String> = snapshot().into_iter().map(|(p, _, n)| (p, n)).collect();
+        let show = |v: Vec<u32>| v.iter().map(|p| format!("{p}:{}", names.get(p).cloned().unwrap_or_default())).collect::<Vec<_>>();
+        println!("sessões: {:?}", show(session_pids()));
+        println!("alvos:   {:?}", show(mix_targets(&[std::process::id()])));
+        for p in mix_targets(&[std::process::id()]) {
+            println!("abrir {p}: {:?}", open_source(p).map(|_| ()).map_err(|e| e.to_string()));
+        }
     }
 
     #[test]
