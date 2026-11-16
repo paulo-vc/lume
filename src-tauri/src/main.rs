@@ -87,7 +87,7 @@ fn listen_requests(app: AppHandle, keys: Keys) -> (Arc<Bus>, tokio::task::JoinHa
             if req.name.is_empty() {
                 req.name = "Convidado".into();
             }
-            let _ = app.emit("join-request", serde_json::json!({ "id": req.id, "name": req.name, "av": req.av }));
+            let _ = app.emit("join-request", serde_json::json!({ "id": req.id, "name": req.name, "av": req.av, "uid": req.uid }));
             h.pending.insert(req.id.clone(), (req, Instant::now()));
         }
     });
@@ -95,8 +95,12 @@ fn listen_requests(app: AppHandle, keys: Keys) -> (Arc<Bus>, tokio::task::JoinHa
 }
 
 #[tauri::command]
-async fn create_room(app: AppHandle, st: State<'_, AppState>, name: String) -> Result<RoomInfo, String> {
-    let code = room::new_code();
+async fn create_room(app: AppHandle, st: State<'_, AppState>, name: String, code: Option<String>) -> Result<RoomInfo, String> {
+    // Sala salva: reabre com o mesmo código, e quem já foi convidado entra de novo com ele.
+    let code = match code {
+        Some(c) if !c.trim().is_empty() => room::normalize(&c)?,
+        _ => room::new_code(),
+    };
     let keys = Keys::from_code(&code)?;
     let (bus, listener) = listen_requests(app, keys.clone());
     let info = RoomInfo { name: name.clone(), code: code.clone() };
@@ -291,9 +295,9 @@ fn set_quality(st: State<AppState>, quality: Quality) {
 
 /// Manda o pedido de entrada pelo relay e espera o anfitrião aceitar. Devolve a resposta SDP.
 #[tauri::command]
-async fn join_room(st: State<'_, AppState>, code: String, name: String, av: String, offer_sdp: String) -> Result<String, String> {
+async fn join_room(st: State<'_, AppState>, code: String, name: String, av: String, uid: String, offer_sdp: String) -> Result<String, String> {
     let keys = Keys::from_code(&code)?;
-    let req = JoinReq { id: room::new_id(), name: name.chars().take(32).collect(), sdp: offer_sdp, av };
+    let req = JoinReq { id: room::new_id(), name: name.chars().take(32).collect(), sdp: offer_sdp, av, uid: uid.chars().take(40).collect() };
     let (bus, mut rx) = Bus::start(keys.answer(&req.id));
     let cancel = Arc::new(Notify::new());
     *st.guest_cancel.lock().unwrap() = Some(cancel.clone());

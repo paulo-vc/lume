@@ -8,89 +8,79 @@
 </head>
 <body>
 <div class="app">
-  <nav class="rail">
-    <div class="logo">✳</div>
-    <button class="on" title="Sala">⌂</button>
-    <button title="Nova sala" data-open="new">＋</button>
-    <button title="Entrar com código" data-open="join">⤓</button>
-    <div class="sp"></div>
-    <button id="theme" title="Tema claro/escuro">◐</button>
-  </nav>
+  <aside class="side">
+    <div class="brand"><span class="logo">✳</span><b>Lume</b><button class="icon" id="theme" title="Tema claro/escuro">◐</button></div>
 
-  <div class="shell">
-    <aside class="side">
-      <div class="dots"><i></i><i></i><i></i></div>
-      <div class="me">
-        <div class="av pick" id="meAv" title="Trocar foto de perfil">?</div>
-        <div><input id="meName" class="name" placeholder="Seu nome" maxlength="32"><small><a id="avPick">Trocar foto</a><span id="avDelWrap" hidden> · <a id="avDel">remover</a></span></small></div>
-        <input type="file" id="avFile" accept="image/*" hidden>
+    <div class="me">
+      <div class="av lg pick" id="meAv" title="Trocar foto de perfil">?</div>
+      <div class="meText">
+        <input id="meName" class="name" placeholder="Seu nome" maxlength="32">
+        <small><a id="avPick">Trocar foto</a><span id="avDelWrap" hidden> · <a id="avDel">Remover</a></span></small>
       </div>
+      <input type="file" id="avFile" accept="image/*" hidden>
+    </div>
 
-      <div class="lbl">Sala</div>
-      <div class="item on" id="roomItem"><span class="dot" id="roomDot"></span><span id="roomLabel">Nenhuma sala</span><span class="n" id="roomCount">0</span></div>
+    <div class="lbl"><span>Salas</span><span class="n" id="roomCount">0</span></div>
+    <div class="rooms" id="rooms"></div>
 
-      <div class="lbl">Ações</div>
-      <div class="item" data-open="new"><span>＋</span>Criar sala</div>
-      <div class="item" data-open="join"><span>⤓</span>Entrar com código</div>
-      <div class="item hostOnly" data-open="invite"><span>✉</span>Código da sala</div>
-      <div class="item hostOnly" id="reqItem"><span>☰</span>Pedidos de entrada<span class="n" id="rCount2">0</span></div>
+    <div class="sideAct">
+      <button class="btn pri" data-open="new">＋ Criar sala</button>
+      <button class="btn ghost" data-open="join">Entrar com código</button>
+    </div>
+  </aside>
 
-      <div class="sp"></div>
-      <div class="hint">Salas existem só enquanto o anfitrião está com o app aberto. Vídeo e áudio vão direto entre os PCs. Servidores públicos são usados só para os PCs se encontrarem, com tudo cifrado pelo código da sala.</div>
-    </aside>
-
-    <main>
-      <div class="top">
-        <div><h1 id="title">Lume</h1><div class="sub" id="subtitle">Crie uma sala ou entre com um código</div></div>
-        <div class="act">
-          <button class="btn ghost hostOnly" data-open="invite">✉ Convidar</button>
-          <button class="btn pri inRoom" id="share">▶ Compartilhar tela</button>
-          <button class="btn ghost inRoom" id="leave">Sair</button>
-        </div>
+  <main>
+    <header class="top">
+      <div class="titles"><h1 id="title">Lume</h1><div class="sub" id="subtitle">Crie uma sala ou entre com um código</div></div>
+      <div class="act">
+        <button class="btn ghost hostOnly" data-open="invite">✉ Convidar</button>
+        <button class="btn pri inRoom" id="share">▶ Compartilhar tela</button>
+        <button class="btn ghost inRoom" id="leave">Sair</button>
       </div>
+    </header>
 
-      <div class="empty" id="empty">
-        <div class="hero">
-          <div class="big">✳</div>
-          <h2>Compartilhe sua tela, direto entre PCs</h2>
-          <p>Sem conta, sem servidor, sem instalação. Só entra quem tem o código e você aceita.</p>
-          <div class="row2"><button class="btn pri" data-open="new">Criar sala</button><button class="btn ghost" data-open="join">Tenho um código</button></div>
-        </div>
+    <div class="empty" id="empty">
+      <div class="hero">
+        <div class="big">✳</div>
+        <h2>Compartilhe sua tela, direto entre PCs</h2>
+        <p>Sem conta, sem servidor, sem instalação. Só entra quem tem o código e você aceita. As salas ficam salvas aqui do lado para você voltar quando quiser.</p>
+        <div class="row2"><button class="btn pri" data-open="new">Criar sala</button><button class="btn ghost" data-open="join">Tenho um código</button></div>
       </div>
+    </div>
 
-      <div class="grid" id="roomView" hidden>
-        <div class="card stage" id="stage">
-          <div class="tiles" id="tiles"></div>
-          <div class="placeholder" id="ph">Ninguém está transmitindo. Qualquer pessoa da sala pode compartilhar a tela.</div>
-        </div>
+    <div class="grid" id="roomView" hidden>
+      <section class="card stage" id="stage">
+        <div class="tiles" id="tiles"></div>
+        <div class="placeholder" id="ph">Ninguém está transmitindo.<br>Qualquer pessoa da sala pode compartilhar a tela.</div>
+      </section>
 
-        <div class="col">
-          <div class="card">
-            <h3>Conexão <span id="connState" class="mute">—</span></h3>
-            <div class="stats">
-              <div class="stat"><small>Latência</small><b id="sLat">—</b></div>
-              <div class="stat"><small>Bitrate</small><b id="sBr">—</b></div>
-              <div class="stat"><small>Perda</small><b id="sLoss">—</b></div>
-            </div>
+      <div class="col">
+        <section class="card">
+          <h3><span>Conexão</span><span id="connState" class="mute">—</span></h3>
+          <div class="stats">
+            <div class="stat"><small>Latência</small><b id="sLat">—</b></div>
+            <div class="stat"><small>Bitrate</small><b id="sBr">—</b></div>
+            <div class="stat"><small>Perda</small><b id="sLoss">—</b></div>
           </div>
+        </section>
 
-          <div class="card">
-            <h3>Qualidade <span class="mute" id="qWho">da sua transmissão</span></h3>
-            <div class="row">Resolução<div class="seg" data-k="res"><button data-v="720">720p</button><button data-v="1080" class="on">1080p</button><button data-v="0">Nativa</button></div></div>
-            <div class="row">FPS<div class="seg" data-k="fps"><button data-v="30">30</button><button data-v="60" class="on">60</button></div></div>
-            <div class="row">Prioridade<div class="seg" data-k="pri"><button data-v="motion" class="on">Fluidez</button><button data-v="detail">Nitidez</button></div></div>
-            <div class="row">Bitrate máx. <span id="brv" class="mute">8 Mbps</span><input id="br" type="range" min="1" max="40" value="8"></div>
-          </div>
+        <section class="card">
+          <h3><span>Qualidade</span><span class="mute">da sua transmissão</span></h3>
+          <div class="row"><span>Resolução</span><div class="seg" data-k="res"><button data-v="720">720p</button><button data-v="1080" class="on">1080p</button><button data-v="0">Nativa</button></div></div>
+          <div class="row"><span>FPS</span><div class="seg" data-k="fps"><button data-v="30">30</button><button data-v="60" class="on">60</button></div></div>
+          <div class="row"><span>Prioridade</span><div class="seg" data-k="pri"><button data-v="motion" class="on">Fluidez</button><button data-v="detail">Nitidez</button></div></div>
+          <div class="row"><span>Bitrate <b id="brv" class="mute">8 Mbps</b></span><input id="br" type="range" min="1" max="40" value="8"></div>
+        </section>
 
-          <div class="card grow">
-            <h3><span class="tabs"><button id="tabPeers" class="on">Participantes <span class="n" id="pCount">0 / 8</span></button><button id="tabReqs" class="hostOnly">Pedidos <span class="n" id="rCount">0</span></button></span></h3>
-            <div id="peers"></div>
-            <div id="reqList" hidden></div>
-          </div>
-        </div>
+        <section class="card grow">
+          <h3 class="guestOnly"><span>Pessoas</span><span class="mute" id="gCount"></span></h3>
+          <div class="tabs"><button id="tabPeers" class="on">Pessoas <span class="n" id="pCount">0</span></button><button id="tabReqs" class="hostOnly">Pedidos <span class="n" id="rCount">0</span></button></div>
+          <div id="peers" class="list"></div>
+          <div id="reqList" class="list" hidden></div>
+        </section>
       </div>
-    </main>
-  </div>
+    </div>
+  </main>
 </div>
 
 <div class="modal" id="modal"><div class="sheet" id="sheet"></div></div>

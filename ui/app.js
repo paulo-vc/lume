@@ -32,6 +32,7 @@ function toast(msg, ms = 2600) { const t = $('toast'); t.textContent = msg; t.cl
 function initials(n) { return (n || '?').trim().split(/\s+/).map(p => p[0]).slice(0, 2).join('').toUpperCase() || '?'; }
 function myName() { return $('meName').value.trim() || 'Convidado'; }
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast('Copiado'); } catch { toast('Não foi possível copiar'); } }
+function normCode(c) { const s = String(c).toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1'); return s.length === 12 ? `${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8)}` : s; }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 // Foto de perfil: só aceita imagem pequena embutida (nada de endereço externo).
 function okAv(a) { return typeof a === 'string' && a.length <= 24000 && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(a) ? a : ''; }
@@ -64,6 +65,59 @@ function tuneReceiver(r) { if ('jitterBufferTarget' in r) r.jitterBufferTarget =
 
 // ---------- perfil (nome e foto ficam só neste PC) ----------
 let myAv = '';
+// Id fixo deste PC: o anfitrião reconhece quem já convidou e deixa entrar de novo sem perguntar.
+let myUid = '';
+try { myUid = localStorage.getItem('sl.uid') || ''; } catch {}
+if (!/^[0-9a-f]{32}$/.test(myUid)) { myUid = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join(''); try { localStorage.setItem('sl.uid', myUid); } catch {} }
+
+// ---------- salas salvas ----------
+// { code, name, role: 'host'|'guest', members: [{uid, name, av}], last }
+let rooms = [];
+try { rooms = JSON.parse(localStorage.getItem('sl.rooms') || '[]'); if (!Array.isArray(rooms)) rooms = []; } catch { rooms = []; }
+function saveRooms() { try { localStorage.setItem('sl.rooms', JSON.stringify(rooms)); } catch {} renderRooms(); }
+function roomByCode(code) { return rooms.find(r => r.code === code); }
+function rememberRoom(code, name, role) {
+  let r = roomByCode(code);
+  if (!r) { r = { code, name, role, members: [] }; rooms.unshift(r); }
+  r.name = name || r.name; r.role = role; r.last = Date.now();
+  saveRooms(); return r;
+}
+function curSaved() { return S.room && S.room.code ? roomByCode(S.room.code) : null; }
+function rememberMember(uid, name, av) {
+  const r = curSaved(); if (!r || S.role !== 'host' || !/^[0-9a-f]{32}$/.test(uid || '')) return;
+  const m = r.members.find(m => m.uid === uid);
+  if (m) { m.name = name; m.av = okAv(av); } else r.members.push({ uid, name, av: okAv(av) });
+  saveRooms();
+}
+function renderRooms() {
+  $('roomCount').textContent = rooms.length;
+  $('rooms').innerHTML = rooms.length ? rooms.map(r => {
+    const cur = S.room && S.room.code === r.code;
+    const who = r.role === 'host' ? (r.members.length ? r.members.map(m => m.name).join(', ') : 'Você é o anfitrião') : 'Convidado';
+    return `<div class="room${cur ? ' on' : ''}" data-code="${esc(r.code)}" title="${esc(r.code)}"><div class="rav">${esc(initials(r.name))}${cur ? '<span class="dot live"></span>' : ''}</div>
+      <div class="rt"><b>${esc(r.name)}</b><small>${esc(who)}</small></div><button class="kick" data-del title="Esquecer esta sala">✕</button></div>`;
+  }).join('') : '<div class="roomsEmpty">As salas que você criar ou entrar ficam aqui. Clique numa para voltar a ela.</div>';
+}
+$('rooms').onclick = e => {
+  const el = e.target.closest('.room'); if (!el) return;
+  const r = roomByCode(el.dataset.code); if (!r) return;
+  if (e.target.closest('[data-del]')) {
+    if (S.room && S.room.code === r.code) return toast('Saia da sala antes de esquecê-la');
+    rooms = rooms.filter(x => x !== r); saveRooms(); return;
+  }
+  if (S.room && S.room.code === r.code) return;
+  if (S.role) leave();
+  if (r.role === 'host') openRoom(r.name, r.code);
+  else { openModal('join'); $('jCode').value = r.code; guestStart(); }
+};
+async function openRoom(name, code) {
+  try { S.room = await invoke('create_room', { name, code: code || null }); }
+  catch (err) { return toast(String(err)); }
+  S.role = 'host'; S.me = HOST; S.avs.set(HOST, myAv);
+  rememberRoom(S.room.code, S.room.name, 'host');
+  render();
+  if (!code) openModal('invite'); else toast('Sala aberta. Quem você já convidou pode entrar com o mesmo código.', 3500);
+}
 try {
   $('meName').value = localStorage.getItem('sl.name') || '';
   myAv = okAv(localStorage.getItem('sl.av') || '');
@@ -78,7 +132,7 @@ function setAv(a) {
   if (S.role === 'guest') sendHost({ t: 'av', av: myAv });
   renderPeers(); labelTiles();
 }
-$('meName').oninput = () => { renderMe(); try { localStorage.setItem('sl.name', $('meName').value); } catch {} };
+$('meName').oninput = () => { renderMe(); if (S.role === 'host') renderPeers(); try { localStorage.setItem('sl.name', $('meName').value); } catch {} };
 $('meAv').onclick = $('avPick').onclick = () => $('avFile').click();
 $('avDel').onclick = () => setAv('');
 $('avFile').onchange = async () => {
@@ -103,52 +157,64 @@ renderMe();
 function roster() {
   if (S.role === 'host') {
     const list = [{ id: HOST, name: myName(), host: true, live: !!S.sharing }];
-    for (const [id, p] of S.peers) list.push({ id, name: id, live: !!p.live, state: p.state, open: p.open });
+    for (const [id, p] of S.peers) list.push({ id, name: id, live: !!p.live, state: p.state, open: p.open, uid: p.uid });
+    const r = curSaved();
+    if (r) for (const m of r.members) if (!list.some(x => x.uid === m.uid || x.name === m.name)) list.push({ id: 'off:' + m.uid, name: m.name, off: true, uid: m.uid });
     return list;
   }
   return S.role === 'guest' ? S.members : [];
 }
 function nameOf(id) { if (id === SELF || id === S.me) return 'Você'; const m = roster().find(m => m.id === id); return m ? m.name : id; }
-function avOf(id) { return id === SELF || id === S.me ? myAv : S.avs.get(id) || ''; }
+function avOf(id) {
+  if (id === SELF || id === S.me) return myAv;
+  if (S.avs.get(id)) return S.avs.get(id);
+  const r = curSaved(), m = r && String(id).startsWith('off:') && r.members.find(m => 'off:' + m.uid === id);
+  return m ? m.av : '';
+}
 
 // ---------- estado visual ----------
 function render() {
   document.body.className = S.role || '';
   const inRoom = !!S.role;
   $('empty').hidden = inRoom; $('roomView').hidden = !inRoom;
-  $('roomDot').className = 'dot' + (inRoom ? ' live' : '');
   if (S.role === 'host') {
     $('title').textContent = S.room.name;
-    $('subtitle').textContent = `Você é o anfitrião · código da sala: ${S.room.code}`;
-    $('roomLabel').textContent = S.room.name;
+    $('subtitle').textContent = `Você é o anfitrião · código ${S.room.code}`;
   } else if (S.role === 'guest') {
-    $('title').textContent = S.room ? S.room.name : 'Sala';
+    $('title').textContent = S.room && S.room.name ? S.room.name : 'Sala';
     $('subtitle').textContent = 'Conexões diretas entre os participantes · criptografado';
-    $('roomLabel').textContent = S.room ? S.room.name : 'Sala';
   } else {
     $('title').textContent = 'Lume'; $('subtitle').textContent = 'Crie uma sala ou entre com um código';
-    $('roomLabel').textContent = 'Nenhuma sala';
   }
-  renderPeers(); renderReqs();
+  renderPeers(); renderReqs(); renderRooms();
 }
 
-const STATE_PT = { connected: '', connecting: 'conectando', new: 'aguardando', disconnected: 'instável', failed: 'falhou', closed: 'saiu' };
+const STATE_PT = { connecting: 'conectando', new: 'conectando', disconnected: 'instável', failed: 'falhou', closed: 'saiu' };
 function renderPeers() {
   const list = roster();
-  $('peers').innerHTML = list.map(m => {
+  const on = list.filter(m => !m.off), off = list.filter(m => m.off);
+  const row = m => {
     const mine = m.id === S.me;
-    const tag = m.host ? 'anfitrião' : m.state ? (STATE_PT[m.state] ?? m.state) : '';
-    return `<div class="peer"><div class="av">${avInner(m.name, avOf(m.id))}</div><span class="pn">${esc(m.name)}${mine ? ' (você)' : ''}</span>
-      ${m.live ? '<span class="live">● AO VIVO</span>' : ''}<small>${esc(tag)}</small>
-      ${S.role === 'host' && !mine ? `<button class="kick" data-kick="${esc(m.id)}" title="Remover da sala">✕</button>` : ''}</div>`;
-  }).join('');
-  $('pCount').textContent = `${list.length} / 8`; $('roomCount').textContent = list.length;
+    const tag = m.live ? '<span class="tag live">● ao vivo</span>'
+      : m.off ? '<span class="tag wait">fora</span>'
+      : m.host ? '<span class="tag">anfitrião</span>'
+      : STATE_PT[m.state] ? `<span class="tag wait">${STATE_PT[m.state]}</span>` : '<span></span>';
+    const act = S.role === 'host' && !mine ? `<button class="kick" data-kick="${esc(m.id)}" title="${m.off ? 'Esquecer esta pessoa' : 'Remover da sala'}">✕</button>` : '<span></span>';
+    return `<div class="peer${m.off ? ' off' : ''}"><div class="av">${avInner(m.name, avOf(m.id))}</div><span class="pn">${esc(m.name)}${mine ? ' <i>(você)</i>' : ''}</span>${tag}${act}</div>`;
+  };
+  $('peers').innerHTML = on.map(row).join('') + (off.length ? '<div class="sep">Fora da sala</div>' + off.map(row).join('') : '');
+  $('pCount').textContent = $('gCount').textContent = `${on.length} / 8`;
 }
 
 // Anfitrião remove alguém da sala (libera a vaga; a pessoa precisa pedir para entrar de novo).
 $('peers').onclick = e => {
   const b = e.target.closest('[data-kick]'); if (!b) return;
-  dropPeer(b.dataset.kick, 'foi removido da sala');
+  const id = b.dataset.kick;
+  if (id.startsWith('off:')) { const r = curSaved(); if (r) { r.members = r.members.filter(m => 'off:' + m.uid !== id); saveRooms(); pushRoster(); } return; }
+  // Remover tira da sala e da lista de convidados (precisa pedir de novo para entrar).
+  const p = S.peers.get(id), r = curSaved();
+  if (p && r && p.uid) { r.members = r.members.filter(m => m.uid !== p.uid); saveRooms(); }
+  dropPeer(id, 'foi removido da sala');
 };
 function dropPeer(id, why) {
   if (!S.peers.delete(id)) return;
@@ -164,7 +230,7 @@ function showTab(reqs) {
   $('peers').hidden = reqs; $('reqList').hidden = !reqs;
 }
 $('tabPeers').onclick = () => showTab(false);
-$('tabReqs').onclick = $('reqItem').onclick = () => showTab(true);
+$('tabReqs').onclick = () => showTab(true);
 
 // ---------- modais ----------
 const modal = $('modal'), sheet = $('sheet');
@@ -176,25 +242,22 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 function openModal(kind) {
   if (kind === 'new') {
     if (S.role) return toast('Saia da sala atual primeiro');
-    sheet.innerHTML = `<h2>Nova sala</h2><p>Você será o anfitrião. A sala existe só enquanto este app estiver aberto e ninguém entra sem você aceitar.</p>
+    sheet.innerHTML = `<h2>Nova sala</h2><p>Você será o anfitrião. A sala fica salva na barra lateral: depois é só clicar nela para abrir de novo, com o mesmo código, e quem você já aceitou entra direto.</p>
       <label>Nome da sala</label><input class="field" id="fRoom" value="Sala de ${esc(myName())}" maxlength="40">
       <div class="act"><button class="btn ghost" id="x">Cancelar</button><button class="btn pri" id="ok">Criar sala</button></div>`;
     $('x').onclick = closeModal;
-    $('ok').onclick = async () => {
-      try { S.room = await invoke('create_room', { name: $('fRoom').value.trim() || 'Sala' }); }
-      catch (err) { return toast(String(err)); }
-      S.role = 'host'; S.me = HOST; S.avs.set(HOST, myAv); render(); openModal('invite');
-    };
+    $('ok').onclick = () => openRoom($('fRoom').value.trim() || 'Sala');
+    $('fRoom').onkeydown = e => { if (e.key === 'Enter') $('ok').click(); };
   }
   if (kind === 'invite') {
     if (S.role !== 'host') return;
-    sheet.innerHTML = `<h2>Código da sala</h2><p>Mande este código para quem você quer convidar. A pessoa digita no Lume dela e você só clica em Aceitar.</p>
+    sheet.innerHTML = `<h2>Código da sala</h2><p>Mande este código para quem você quer convidar. A pessoa digita no Lume dela e você clica em Aceitar só na primeira vez; depois ela entra direto sempre que a sala estiver aberta.</p>
       <div class="bigcode" id="inv">${esc(S.room.code)}</div>
       <div class="mute" id="relay" style="text-align:center;font-size:12px;margin-top:8px"></div>
-      <div class="act"><button class="btn ghost" id="rot">Trocar código</button><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="cp">Copiar código</button></div>`;
+      <div class="act"><button class="btn ghost" id="rot" title="O código antigo para de funcionar para todos">Trocar código</button><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="cp">Copiar código</button></div>`;
     $('x').onclick = closeModal;
     $('cp').onclick = () => copy(S.room.code);
-    $('rot').onclick = async () => { S.room = await invoke('new_code'); S.reqs.clear(); $('reqs').innerHTML = ''; render(); openModal('invite'); toast('O código antigo parou de funcionar'); };
+    $('rot').onclick = async () => { const old = curSaved(); S.room = await invoke('new_code'); if (old) { old.code = S.room.code; saveRooms(); } S.reqs.clear(); $('reqs').innerHTML = ''; render(); openModal('invite'); toast('O código antigo parou de funcionar'); };
     const check = async () => {
       if (!$('relay')) return;
       const n = await invoke('relays_online').catch(() => 0);
@@ -223,9 +286,9 @@ function openModal(kind) {
 // Cada pedido aparece como aviso no canto e fica na aba Pedidos até ser aceito, recusado ou a pessoa desistir.
 function renderReqs() {
   const n = S.reqs.size;
-  for (const id of ['rCount', 'rCount2']) { $(id).textContent = n; $(id).classList.toggle('hot', n > 0); }
-  $('reqList').innerHTML = n ? [...S.reqs.values()].map(r => `<div class="reqrow" data-id="${esc(r.id)}"><div class="av">${avInner(r.name, r.av)}</div><span class="pn">${esc(r.name)}</span>
-    <button class="btn ghost" data-a="no">Recusar</button><button class="btn pri" data-a="yes">Aceitar</button></div>`).join('')
+  $('rCount').textContent = n; $('rCount').classList.toggle('hot', n > 0);
+  $('reqList').innerHTML = n ? [...S.reqs.values()].map(r => `<div class="peer reqrow" data-id="${esc(r.id)}"><div class="av">${avInner(r.name, r.av)}</div><span class="pn">${esc(r.name)}</span>
+    <button class="btn ghost sm" data-a="no">Recusar</button><button class="btn pri sm" data-a="yes">Aceitar</button></div>`).join('')
     : '<div class="mute" style="padding:8px 0">Nenhum pedido pendente. Quem digitar o código da sala aparece aqui.</div>';
 }
 function forgetReq(id) {
@@ -241,7 +304,7 @@ async function answerReq(id, yes, btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Conectando…'; }
   try {
     const who = await invoke('approve_request', { id });
-    S.peers.set(who, { state: 'connecting', live: false, open: false, q: Promise.resolve() });
+    S.peers.set(who, { state: 'connecting', live: false, open: false, q: Promise.resolve(), uid: r.uid, av: r.av });
     if (okAv(r.av)) S.avs.set(who, r.av);
     renderPeers();
   } catch (err) { toast(String(err)); }
@@ -257,11 +320,15 @@ $('reqs').onclick = onReqClick; $('reqList').onclick = onReqClick;
 
 listen('join-request', ({ payload: r }) => {
   if (S.role !== 'host' || S.reqs.has(r.id)) return;
-  r.av = okAv(r.av); S.reqs.set(r.id, r); renderReqs();
+  r.av = okAv(r.av); S.reqs.set(r.id, r);
+  // Já foi aceito antes nesta sala: entra direto.
+  const known = curSaved() && /^[0-9a-f]{32}$/.test(r.uid || '') && curSaved().members.some(m => m.uid === r.uid);
+  if (known) { toast(`${r.name} voltou para a sala`); return answerReq(r.id, true); }
+  renderReqs();
   const el = document.createElement('div');
   el.className = 'reqcard'; el.dataset.id = r.id;
-  el.innerHTML = `<div class="av">${avInner(r.name, r.av)}</div><div class="who"><b>${esc(r.name)}</b><small>quer entrar na sala</small></div>
-    <button class="btn ghost" data-a="no">Recusar</button><button class="btn pri" data-a="yes">Aceitar</button><button class="x" data-a="hide" title="Decidir depois">✕</button>`;
+  el.innerHTML = `<div class="av">${avInner(r.name, r.av)}</div><div><b>${esc(r.name)}</b><small>quer entrar na sala</small></div>
+    <button class="btn ghost sm" data-a="no">Recusar</button><button class="btn pri sm" data-a="yes">Aceitar</button><button class="kick" data-a="hide" title="Decidir depois (fica na aba Pedidos)">✕</button>`;
   $('reqs').appendChild(el);
   if (modal.classList.contains('show') && $('inv')) closeModal();
 });
@@ -283,7 +350,7 @@ function broadcast(obj, except) { for (const id of S.peers.keys()) if (id !== ex
 function sendHost(obj) { if (S.guestDc && S.guestDc.readyState === 'open') S.guestDc.send(JSON.stringify(obj)); }
 function pushRoster() {
   if (S.role !== 'host') return;
-  broadcast({ t: 'roster', members: roster().filter(m => m.host || m.open).map(({ id, name, host, live }) => ({ id, name, host: !!host, live })) });
+  broadcast({ t: 'roster', members: roster().filter(m => m.host || m.open || m.off).map(({ id, name, host, live, off }) => ({ id, name, host: !!host, live: !!live, off: !!off })) });
   refresh();
 }
 function refresh() { renderPeers(); syncStreams(); }
@@ -301,7 +368,7 @@ listen('ctl-msg', ({ payload: [id, text] }) => {
   let m; try { m = JSON.parse(text); } catch { return; }
   if (m.t === 'live') { p.live = !!m.on; pushRoster(); }
   if (m.t === 'bye') dropPeer(id, 'saiu');
-  if (m.t === 'av') { const av = okAv(m.av); S.avs.set(id, av); broadcast({ t: 'av', id, av }, id); renderPeers(); labelTiles(); }
+  if (m.t === 'av') { const av = okAv(m.av); S.avs.set(id, av); rememberMember(p.uid, id, av); broadcast({ t: 'av', id, av }, id); renderPeers(); labelTiles(); }
   if (m.t === 'sig') {
     m.from = id; // quem mandou é quem o canal diz que é, não o que veio escrito
     if (m.to === HOST) onSig(m); else if (S.peers.has(m.to)) sendPeer(m.to, m);
@@ -311,15 +378,15 @@ listen('peer-state', ({ payload: [id, st] }) => {
   if (S.role !== 'host') return; // no convidado esses avisos são de quem assiste a tela dele
   const p = S.peers.get(id); if (!p) return;
   p.state = st;
-  if (st === 'connected') toast(`${id} entrou`);
+  if (st === 'connected') { toast(`${id} entrou`); rememberMember(p.uid, id, S.avs.get(id) || p.av); }
   if (st === 'failed' || st === 'closed') return dropPeer(id, st === 'failed' ? 'não conseguiu conectar' : 'saiu');
   renderPeers();
 });
 
 function onHostMsg(text) {
   let m; try { m = JSON.parse(text); } catch { return; }
-  if (m.t === 'hello') { S.me = String(m.you); S.room = { name: String(m.room || 'Sala') }; render(); }
-  if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live }));
+  if (m.t === 'hello') { S.me = String(m.you); S.room = { name: String(m.room || 'Sala').slice(0, 40), code: S.joinCode }; rememberRoom(S.joinCode, S.room.name, 'guest'); render(); }
+  if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off }));
   if (m.t === 'av') { S.avs.set(String(m.id), okAv(m.av)); labelTiles(); }
   if (m.t === 'sig') onSig(m);
   if (S.me) refresh();
@@ -519,6 +586,9 @@ async function guestStart() {
   const code = $('jCode').value.trim();
   const name = $('jName').value.trim() || 'Convidado';
   if (code.replace(/[^a-z0-9]/gi, '').length !== 12) return toast('O código tem 12 letras e números');
+  if ($('go').disabled) return;
+  const saved = roomByCode(normCode(code));
+  if ($('jStatus')) $('jStatus').dataset.saved = saved ? '1' : '';
   $('meName').value = name; $('meName').oninput();
   $('go').disabled = true; $('jCode').disabled = true; $('jName').disabled = true;
   $('jStatus').textContent = 'Preparando a conexão…';
@@ -538,10 +608,12 @@ async function guestStart() {
   await pc.setLocalDescription(await pc.createOffer());
   await waitIce(pc);
   S.guestPc = pc; S.guestDc = dc; S.hostMs = ms;
-  if ($('jStatus')) $('jStatus').textContent = 'Pedido enviado. Aguardando o anfitrião aceitar…';
+  if ($('jStatus')) $('jStatus').textContent = saved ? `Chamando ${saved.name}… Se o anfitrião ainda não abriu a sala, fica esperando.` : 'Pedido enviado. Aguardando o anfitrião aceitar…';
   try {
-    const sdp = await invoke('join_room', { code, name, av: myAv, offerSdp: pc.localDescription.sdp });
+    const sdp = await invoke('join_room', { code, name, av: myAv, uid: myUid, offerSdp: pc.localDescription.sdp });
     await pc.setRemoteDescription({ type: 'answer', sdp });
+    S.joinCode = normCode(code);
+    S.room = { name: (roomByCode(S.joinCode) || {}).name || '', code: S.joinCode };
     S.role = 'guest'; render(); closeModal(); toast('Aceito! Conectando…');
   } catch (err) {
     pc.close(); if (S.guestPc === pc) S.guestPc = S.guestDc = S.hostMs = null;
@@ -572,7 +644,7 @@ function leave() {
   $('reqs').innerHTML = '';
   S.peers.clear(); S.members = []; S.avs.clear(); S.reqs.clear(); S.failed.clear();
   if (S.guestPc) S.guestPc.close();
-  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.me = null; S.focus = null;
+  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.me = null; S.focus = null;
   showTab(false); layoutTiles(); render();
 }
 $('leave').onclick = leave;
@@ -603,7 +675,7 @@ setInterval(async () => {
   const watched = [...S.streams].filter(([id]) => id !== SELF);
   const cur = (watched.find(([id]) => id === S.focus) || watched[0] || [])[1];
   const s = cur && cur.stats;
-  const n = S.role === 'host' ? [...S.peers.values()].filter(p => p.state === 'connected').length : S.members.length - 1;
+  const n = S.role === 'host' ? [...S.peers.values()].filter(p => p.state === 'connected').length : S.members.filter(m => !m.off).length - 1;
   const ok = S.role === 'host' ? n > 0 : S.guestPc && S.guestPc.connectionState === 'connected';
   $('connState').textContent = S.role === 'host' ? (n ? `● ${n} conectado${n > 1 ? 's' : ''}` : 'ninguém conectado') : ok ? '● direta' : 'conectando…';
   $('connState').style.color = ok ? 'var(--good)' : '';
