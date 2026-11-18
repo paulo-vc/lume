@@ -214,7 +214,8 @@ impl Engine {
                 .with_interceptor_registry(registry)
                 .with_handler(handler)
                 .with_runtime(runtime)
-                .with_udp_addrs(vec!["0.0.0.0:0".to_string()])
+                // IPv6 também: muitos provedores (CGNAT no IPv4) dão IPv6 público, que conecta direto.
+                .with_udp_addrs(vec!["0.0.0.0:0".to_string(), "[::]:0".to_string()])
                 .build()
                 .await
                 .map_err(|x| e(&x))?,
@@ -394,16 +395,34 @@ struct EncStats {
 static HW_BROKEN: AtomicBool = AtomicBool::new(false);
 
 /// Placa de vídeo (Media Foundation) quando possível; senão OpenH264 na CPU.
+/// Com o conversor, o quadro vai da captura ao encoder sem sair da placa de vídeo.
 enum VideoEnc {
-    Hw(crate::mf::HwEncoder),
+    Hw(crate::mf::HwEncoder, Option<crate::gpu::Converter>),
     Sw(Encoder),
 }
 
 impl VideoEnc {
-    fn new(q: &Quality, w: usize, h: usize, app: &Emit) -> Option<Self> {
+    /// `src` é o quadro que chegou da captura (diz se ele está na GPU e o tamanho original).
+    fn new(q: &Quality, w: usize, h: usize, src: &RawFrame, app: &Emit) -> Option<Self> {
+        let (fps, br, gop) = (q.fps, q.br * 1_000_000, q.fps * 3);
+        if let Some(g) = &src.gpu {
+            // Quadro só na GPU: precisa do encoder de hardware lendo texturas.
+            if !HW_BROKEN.load(Ordering::SeqCst) {
+                let conv = crate::gpu::Converter::new(&g.dev, (src.width as u32, src.height as u32), (w as u32, h as u32));
+                let enc = conv.as_ref().map_err(|e| e.message()).and_then(|_| crate::mf::HwEncoder::new(w, h, fps, br, gop, Some(&g.dev)));
+                match (conv, enc) {
+                    (Ok(c), Ok(e)) => return Some(Self::Hw(e, Some(c))),
+                    (_, Err(err)) =>(app)("gpu-fallback", serde_json::json!(err)),
+                    (Err(err), _) => (app)("gpu-fallback", serde_json::json!(err.message())),
+                }
+            }
+            // Daqui em diante a captura manda os pixels pela memória.
+            crate::gpu::BROKEN.store(true, Ordering::SeqCst);
+            return None;
+        }
         if !HW_BROKEN.load(Ordering::SeqCst) {
-            match crate::mf::HwEncoder::new(w, h, q.fps, q.br * 1_000_000, q.fps * 3) {
-                Ok(e) => return Some(Self::Hw(e)),
+            match crate::mf::HwEncoder::new(w, h, fps, br, gop, None) {
+                Ok(e) => return Some(Self::Hw(e, None)),
                 Err(err) => {
                     HW_BROKEN.store(true, Ordering::SeqCst);
                     (app)("enc-fallback", serde_json::json!(err));
@@ -414,23 +433,36 @@ impl VideoEnc {
     }
     fn name(&self) -> String {
         match self {
-            Self::Hw(e) => format!("{} (GPU)", e.name.trim_end_matches("Encoder").trim_end_matches("h264").trim()),
+            Self::Hw(e, c) => format!(
+                "{} ({})",
+                e.name.trim_end_matches("Encoder").trim_end_matches("h264").trim(),
+                if c.is_some() && e.uses_gpu() { "GPU direto" } else { "GPU" }
+            ),
             Self::Sw(_) => "OpenH264 (CPU)".into(),
         }
     }
     fn force_idr(&mut self) {
         match self {
-            Self::Hw(e) => e.force_keyframe(),
+            Self::Hw(e, _) => e.force_keyframe(),
             Self::Sw(e) => e.force_intra_frame(),
         }
     }
     fn encode(&mut self, f: &RawFrame) -> Result<Vec<u8>, String> {
-        match self {
-            Self::Hw(e) => e.encode(&f.bgra).inspect_err(|_| HW_BROKEN.store(true, Ordering::SeqCst)),
-            Self::Sw(e) => {
+        match (self, &f.gpu) {
+            (Self::Hw(e, Some(c)), Some(g)) => {
+                if !c.fits((f.width as u32, f.height as u32), c.dst) {
+                    return Err("tamanho mudou".into()); // recria conversor e encoder
+                }
+                let r = c.convert(&g.tex).map_err(|x| x.message()).and_then(|t| e.encode_texture(&t));
+                r.inspect_err(|_| crate::gpu::BROKEN.store(true, Ordering::SeqCst))
+            }
+            (Self::Hw(e, None), None) => e.encode(&f.bgra).inspect_err(|_| HW_BROKEN.store(true, Ordering::SeqCst)),
+            (Self::Sw(e), None) => {
                 let yuv = YUVBuffer::from_bgra8_source(BgraSliceU8::new(&f.bgra, (f.width, f.height)));
                 e.encode(&yuv).map(|bs| bs.to_vec()).map_err(|x| x.to_string())
             }
+            // Quadro e encoder de caminhos diferentes (a GPU acabou de ser desligada): recria.
+            _ => Err("caminho trocado".into()),
         }
     }
 }
@@ -477,6 +509,55 @@ mod tests {
         let _ = ctl.stop();
         println!("{frames} quadros codificados em 2 s, {dims:?}, {} kB", bytes / 1024);
         assert!(frames > 5, "poucos quadros: {frames}");
+    }
+
+    /// Mede quanto de CPU a transmissão gasta (captura + conversão + encoder), sem rede.
+    /// `LUME_RES=0 cargo test cpu_cost -- --ignored --nocapture` (LUME_CPU=1 força o caminho antigo)
+    #[test]
+    #[ignore]
+    fn cpu_cost() {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+        let cpu = || unsafe {
+            let (mut a, mut b, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+            let _ = GetProcessTimes(GetCurrentProcess(), &mut a, &mut b, &mut k, &mut u);
+            let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+            t(k) + t(u)
+        };
+        let res: u32 = std::env::var("LUME_RES").ok().and_then(|v| v.parse().ok()).unwrap_or(1080);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let engine = Arc::new(Engine::new(Arc::new(|ev: &str, v: serde_json::Value| {
+                if ev != "enc-stats" || std::env::var_os("LUME_VERBOSE").is_some() {
+                    println!("[{ev}] {v}")
+                }
+            })));
+            engine.set_quality(Quality { res, fps: 60, pri: "motion".into(), br: 12 });
+            let mut rx = engine.frames.subscribe();
+            let src = std::env::var("LUME_SRC").unwrap_or("m:1".into());
+            engine.start_share(&src, "Teste".into()).unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await; // aquece
+            while rx.try_recv().is_ok() {}
+            let (c0, t0) = (cpu(), Instant::now());
+            let (mut n, mut bytes) = (0, 0);
+            while t0.elapsed() < Duration::from_secs(10) {
+                if let Ok(Ok(f)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                    n += 1;
+                    bytes += f.data.len();
+                }
+            }
+            let (c1, el) = (cpu(), t0.elapsed().as_secs_f64());
+            engine.stop_share();
+            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+            println!(
+                "caminho {}: {:.0} quadros/s, {:.1} Mbps, CPU {:.2} núcleo ({:.1}% do PC)",
+                if crate::gpu::disabled() { "CPU" } else { "GPU direto" },
+                n as f64 / el,
+                bytes as f64 * 8.0 / el / 1e6,
+                (c1 - c0) / el,
+                (c1 - c0) / el / cores * 100.0
+            );
+        });
     }
 
     /// Teste de ponta a ponta com um navegador real como convidado:
@@ -551,7 +632,7 @@ fn encode_loop(
     let mut enc_name = String::new();
     let mut last = Instant::now();
     let (mut n, mut bytes, mut window) = (0u32, 0usize, Instant::now());
-    let mut dims = (0, 0);
+    let mut dims = ((0, 0), (0, 0));
 
     let mut last_raw: Option<RawFrame> = None;
     while !stop.load(Ordering::SeqCst) {
@@ -562,7 +643,7 @@ fn encode_loop(
             Ok(r) => r,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(_) => match &last_raw {
-                Some(r) if idr.load(Ordering::SeqCst) || v != seen => RawFrame { bgra: r.bgra.clone(), width: r.width, height: r.height },
+                Some(r) if idr.load(Ordering::SeqCst) || v != seen => r.clone(),
                 _ => continue,
             },
         };
@@ -571,14 +652,17 @@ fn encode_loop(
             q = quality.lock().unwrap().clone();
             enc = None;
         }
-        let f = capture::downscale(&raw, q.res as usize);
+        // Na GPU o conversor reduz junto com a conversão de cor; na CPU reduz aqui.
+        let f = if raw.gpu.is_some() { raw.clone() } else { capture::downscale(&raw, q.res as usize) };
+        let out_dims = crate::gpu::target_dims(raw.width, raw.height, q.res as usize);
+        let src_dims = (raw.width, raw.height);
         last_raw = Some(raw);
-        if (f.width, f.height) != dims {
-            dims = (f.width, f.height);
+        if (out_dims, src_dims) != dims {
+            dims = (out_dims, src_dims);
             enc = None; // mudança de tamanho (ex.: janela redimensionada)
         }
         if enc.is_none() {
-            enc = VideoEnc::new(&q, f.width, f.height, &app);
+            enc = VideoEnc::new(&q, out_dims.0, out_dims.1, &f, &app);
             enc_name = enc.as_ref().map(|e| e.name()).unwrap_or_default();
             idr.store(true, Ordering::SeqCst); // encoder novo começa com quadro-chave
         }
@@ -605,7 +689,7 @@ fn encode_loop(
 
         if window.elapsed() >= Duration::from_secs(1) {
             let s = window.elapsed().as_secs_f32();
-            (app)("enc-stats", serde_json::to_value(EncStats { width: f.width, height: f.height, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone() }).unwrap());
+            (app)("enc-stats", serde_json::to_value(EncStats { width: out_dims.0, height: out_dims.1, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone() }).unwrap());
             n = 0;
             bytes = 0;
             window = Instant::now();

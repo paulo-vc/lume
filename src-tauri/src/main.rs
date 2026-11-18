@@ -2,6 +2,7 @@
 
 mod audio;
 mod capture;
+mod gpu;
 mod mf;
 mod room;
 mod signal;
