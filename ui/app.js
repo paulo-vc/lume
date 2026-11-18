@@ -1,19 +1,30 @@
-// Lume - interface + WebRTC (o WebView2 usa o encoder H.264 por hardware da GPU).
-// A criptografia dos convites e a validação de quem entra ficam no Rust (src-tauri/src/room.rs).
+// Lume - interface. Captura, encoder e envio são nativos (Rust); aqui ficam a sala e quem assiste.
+// Sala: cada convidado tem uma conexão com o anfitrião (vídeo do anfitrião + canal de controle).
+// Quando outro participante transmite, quem assiste abre uma conexão direta com ele; a oferta
+// e a resposta dessa conexão viajam pelo canal de controle, com o anfitrião repassando.
 'use strict';
 
 const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : async () => { throw 'Rode dentro do app' };
+const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
 const $ = id => document.getElementById(id);
 const ICE = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
+const HOST = '@host', SELF = '@me';
 
 const S = {
   role: null,            // 'host' | 'guest'
-  room: null,            // RoomInfo (host)
-  stream: null,          // tela + áudio (host)
-  micStream: null,
-  peers: new Map(),      // host: name -> {pc, dc, video, audio}
-  guestPc: null, guestDc: null,
+  room: null,            // {name, code} (o convidado só conhece o nome)
+  me: null,              // meu id na sala ('@host' para o anfitrião)
+  peers: new Map(),      // anfitrião: id -> {state, live, open, av, q}
+  members: [],           // convidado: lista que o anfitrião manda [{id, name, host, live}]
+  avs: new Map(),        // id -> foto
+  reqs: new Map(),       // anfitrião: pedidos pendentes id -> {id, name, av}
+  streams: new Map(),    // telas na grade: id -> {pc, ms, el, ...}
+  failed: new Map(),     // id -> quando a conexão com essa tela falhou (para tentar de novo depois)
+  focus: null,
+  sharing: null,         // título do que eu estou transmitindo
+  guestPc: null, guestDc: null, hostMs: null,
   q: { res: 1080, fps: 60, pri: 'motion', br: 8 },
+  enc: null,
 };
 
 // ---------- utilidades ----------
@@ -21,7 +32,11 @@ function toast(msg, ms = 2600) { const t = $('toast'); t.textContent = msg; t.cl
 function initials(n) { return (n || '?').trim().split(/\s+/).map(p => p[0]).slice(0, 2).join('').toUpperCase() || '?'; }
 function myName() { return $('meName').value.trim() || 'Convidado'; }
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast('Copiado'); } catch { toast('Não foi possível copiar'); } }
+function normCode(c) { const s = String(c).toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1'); return s.length === 12 ? `${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8)}` : s; }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+// Foto de perfil: só aceita imagem pequena embutida (nada de endereço externo).
+function okAv(a) { return typeof a === 'string' && a.length <= 24000 && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(a) ? a : ''; }
+function avInner(name, av) { return okAv(av) ? `<img src="${av}" alt="">` : esc(initials(name)); }
 
 function waitIce(pc, ms = 4000) {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
@@ -39,47 +54,183 @@ function preferH264(transceiver) {
   if (h264.length) transceiver.setCodecPreferences([...h264, ...rest]);
 }
 
-// ---------- persistência leve ----------
-try { $('meName').value = localStorage.getItem('sl.name') || ''; document.documentElement.dataset.theme = localStorage.getItem('sl.theme') || 'light'; } catch {}
-$('meAv').textContent = initials($('meName').value);
-$('meName').oninput = () => { $('meAv').textContent = initials($('meName').value); try { localStorage.setItem('sl.name', $('meName').value); } catch {} };
+// Conexão só para assistir (vídeo + áudio).
+function recvPc() {
+  const pc = new RTCPeerConnection({ iceServers: ICE });
+  preferH264(pc.addTransceiver('video', { direction: 'recvonly' }));
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+  return pc;
+}
+function tuneReceiver(r) { if ('jitterBufferTarget' in r) r.jitterBufferTarget = 40; } // ms, buffer curto
+
+// ---------- perfil (nome e foto ficam só neste PC) ----------
+let myAv = '';
+// Id fixo deste PC: o anfitrião reconhece quem já convidou e deixa entrar de novo sem perguntar.
+let myUid = '';
+try { myUid = localStorage.getItem('sl.uid') || ''; } catch {}
+if (!/^[0-9a-f]{32}$/.test(myUid)) { myUid = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join(''); try { localStorage.setItem('sl.uid', myUid); } catch {} }
+
+// ---------- salas salvas ----------
+// { code, name, role: 'host'|'guest', members: [{uid, name, av}], last }
+let rooms = [];
+try { rooms = JSON.parse(localStorage.getItem('sl.rooms') || '[]'); if (!Array.isArray(rooms)) rooms = []; } catch { rooms = []; }
+function saveRooms() { try { localStorage.setItem('sl.rooms', JSON.stringify(rooms)); } catch {} renderRooms(); }
+function roomByCode(code) { return rooms.find(r => r.code === code); }
+function rememberRoom(code, name, role) {
+  let r = roomByCode(code);
+  if (!r) { r = { code, name, role, members: [] }; rooms.unshift(r); }
+  r.name = name || r.name; r.role = role; r.last = Date.now();
+  saveRooms(); return r;
+}
+function curSaved() { return S.room && S.room.code ? roomByCode(S.room.code) : null; }
+function rememberMember(uid, name, av) {
+  const r = curSaved(); if (!r || S.role !== 'host' || !/^[0-9a-f]{32}$/.test(uid || '')) return;
+  const m = r.members.find(m => m.uid === uid);
+  if (m) { m.name = name; m.av = okAv(av); } else r.members.push({ uid, name, av: okAv(av) });
+  saveRooms();
+}
+function renderRooms() {
+  $('roomCount').textContent = rooms.length;
+  $('rooms').innerHTML = rooms.length ? rooms.map(r => {
+    const cur = S.room && S.room.code === r.code;
+    const who = r.role === 'host' ? (r.members.length ? r.members.map(m => m.name).join(', ') : 'Você é o anfitrião') : 'Convidado';
+    return `<div class="room${cur ? ' on' : ''}" data-code="${esc(r.code)}" title="${esc(r.code)}"><div class="rav">${esc(initials(r.name))}${cur ? '<span class="dot live"></span>' : ''}</div>
+      <div class="rt"><b>${esc(r.name)}</b><small>${esc(who)}</small></div><button class="kick" data-del title="Esquecer esta sala">✕</button></div>`;
+  }).join('') : '<div class="roomsEmpty">As salas que você criar ou entrar ficam aqui. Clique numa para voltar a ela.</div>';
+}
+$('rooms').onclick = e => {
+  const el = e.target.closest('.room'); if (!el) return;
+  const r = roomByCode(el.dataset.code); if (!r) return;
+  if (e.target.closest('[data-del]')) {
+    if (S.room && S.room.code === r.code) return toast('Saia da sala antes de esquecê-la');
+    rooms = rooms.filter(x => x !== r); saveRooms(); return;
+  }
+  if (S.room && S.room.code === r.code) return;
+  if (S.role) leave();
+  if (r.role === 'host') openRoom(r.name, r.code);
+  else { openModal('join'); $('jCode').value = r.code; guestStart(); }
+};
+async function openRoom(name, code) {
+  try { S.room = await invoke('create_room', { name, code: code || null }); }
+  catch (err) { return toast(String(err)); }
+  S.role = 'host'; S.me = HOST; S.avs.set(HOST, myAv);
+  rememberRoom(S.room.code, S.room.name, 'host');
+  render();
+  if (!code) openModal('invite'); else toast('Sala aberta. Quem você já convidou pode entrar com o mesmo código.', 3500);
+}
+try {
+  $('meName').value = localStorage.getItem('sl.name') || '';
+  myAv = okAv(localStorage.getItem('sl.av') || '');
+  document.documentElement.dataset.theme = localStorage.getItem('sl.theme') || 'light';
+} catch {}
+function renderMe() { $('meAv').innerHTML = avInner($('meName').value, myAv); $('avDelWrap').hidden = !myAv; }
+function setAv(a) {
+  myAv = okAv(a);
+  try { myAv ? localStorage.setItem('sl.av', myAv) : localStorage.removeItem('sl.av'); } catch {}
+  renderMe();
+  if (S.role === 'host') { S.avs.set(HOST, myAv); broadcast({ t: 'av', id: HOST, av: myAv }); }
+  if (S.role === 'guest') sendHost({ t: 'av', av: myAv });
+  renderPeers(); labelTiles();
+}
+$('meName').oninput = () => { renderMe(); if (S.role === 'host') renderPeers(); try { localStorage.setItem('sl.name', $('meName').value); } catch {} };
+$('meAv').onclick = $('avPick').onclick = () => $('avFile').click();
+$('avDel').onclick = () => setAv('');
+$('avFile').onchange = async () => {
+  const f = $('avFile').files[0]; $('avFile').value = '';
+  if (!f) return;
+  try {
+    // Recorta um quadrado no centro e reduz para 96 px: fica com poucos kB e viaja junto do pedido de entrada.
+    const img = await createImageBitmap(f);
+    const side = Math.min(img.width, img.height);
+    const c = document.createElement('canvas'); c.width = c.height = 96;
+    c.getContext('2d').drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, 96, 96);
+    let out = c.toDataURL('image/jpeg', 0.82);
+    if (out.length > 24000) out = c.toDataURL('image/jpeg', 0.5);
+    if (!okAv(out)) throw 0;
+    setAv(out);
+  } catch { toast('Não consegui abrir essa imagem'); }
+};
 $('theme').onclick = () => { const d = document.documentElement; d.dataset.theme = d.dataset.theme === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('sl.theme', d.dataset.theme); } catch {} };
+renderMe();
+
+// ---------- quem está na sala ----------
+function roster() {
+  if (S.role === 'host') {
+    const list = [{ id: HOST, name: myName(), host: true, live: !!S.sharing }];
+    for (const [id, p] of S.peers) list.push({ id, name: id, live: !!p.live, state: p.state, open: p.open, uid: p.uid });
+    const r = curSaved();
+    if (r) for (const m of r.members) if (!list.some(x => x.uid === m.uid || x.name === m.name)) list.push({ id: 'off:' + m.uid, name: m.name, off: true, uid: m.uid });
+    return list;
+  }
+  return S.role === 'guest' ? S.members : [];
+}
+function nameOf(id) { if (id === SELF || id === S.me) return 'Você'; const m = roster().find(m => m.id === id); return m ? m.name : id; }
+function avOf(id) {
+  if (id === SELF || id === S.me) return myAv;
+  if (S.avs.get(id)) return S.avs.get(id);
+  const r = curSaved(), m = r && String(id).startsWith('off:') && r.members.find(m => 'off:' + m.uid === id);
+  return m ? m.av : '';
+}
 
 // ---------- estado visual ----------
 function render() {
   document.body.className = S.role || '';
   const inRoom = !!S.role;
   $('empty').hidden = inRoom; $('roomView').hidden = !inRoom;
-  $('roomDot').className = 'dot' + (inRoom ? ' live' : '');
   if (S.role === 'host') {
     $('title').textContent = S.room.name;
-    $('subtitle').textContent = 'Você é o anfitrião · sala privada, só por convite';
-    $('roomLabel').textContent = S.room.name;
-    $('qWho').textContent = 'aplica a todos';
+    $('subtitle').textContent = `Você é o anfitrião · código ${S.room.code}`;
   } else if (S.role === 'guest') {
-    $('title').textContent = 'Assistindo';
-    $('subtitle').textContent = 'Conectado direto ao anfitrião · criptografado';
-    $('roomLabel').textContent = 'Sala do anfitrião';
-    $('qWho').textContent = 'pede ao anfitrião';
+    $('title').textContent = S.room && S.room.name ? S.room.name : 'Sala';
+    $('subtitle').textContent = 'Conexões diretas entre os participantes · criptografado';
   } else {
-    $('title').textContent = 'Lume'; $('subtitle').textContent = 'Crie uma sala ou entre com um convite';
-    $('roomLabel').textContent = 'Nenhuma sala';
+    $('title').textContent = 'Lume'; $('subtitle').textContent = 'Crie uma sala ou entre com um código';
   }
-  renderPeers();
+  renderPeers(); renderReqs(); renderRooms();
 }
 
+const STATE_PT = { connecting: 'conectando', new: 'conectando', disconnected: 'instável', failed: 'falhou', closed: 'saiu' };
 function renderPeers() {
-  const list = [];
-  if (S.role === 'host') {
-    list.push({ name: myName() + ' (você)', tag: 'anfitrião' });
-    for (const [n, p] of S.peers) list.push({ name: n, tag: STATE_PT[p.state] || p.state });
-  } else if (S.role === 'guest') {
-    list.push({ name: 'Anfitrião', tag: S.guestPc ? S.guestPc.connectionState : '' }, { name: myName() + ' (você)', tag: '' });
-  }
-  $('peers').innerHTML = list.map(p => `<div class="peer"><div class="av">${esc(initials(p.name))}</div>${esc(p.name)}<small>${esc(p.tag)}</small></div>`).join('');
-  const n = S.role === 'host' ? S.peers.size + 1 : S.role ? 2 : 0;
-  $('pCount').textContent = `${n} / 8`; $('roomCount').textContent = n;
+  const list = roster();
+  const on = list.filter(m => !m.off), off = list.filter(m => m.off);
+  const row = m => {
+    const mine = m.id === S.me;
+    const tag = m.live ? '<span class="tag live">● ao vivo</span>'
+      : m.off ? '<span class="tag wait">fora</span>'
+      : m.host ? '<span class="tag">anfitrião</span>'
+      : STATE_PT[m.state] ? `<span class="tag wait">${STATE_PT[m.state]}</span>` : '<span></span>';
+    const act = S.role === 'host' && !mine ? `<button class="kick" data-kick="${esc(m.id)}" title="${m.off ? 'Esquecer esta pessoa' : 'Remover da sala'}">✕</button>` : '<span></span>';
+    return `<div class="peer${m.off ? ' off' : ''}"><div class="av">${avInner(m.name, avOf(m.id))}</div><span class="pn">${esc(m.name)}${mine ? ' <i>(você)</i>' : ''}</span>${tag}${act}</div>`;
+  };
+  $('peers').innerHTML = on.map(row).join('') + (off.length ? '<div class="sep">Fora da sala</div>' + off.map(row).join('') : '');
+  $('pCount').textContent = $('gCount').textContent = `${on.length} / 8`;
 }
+
+// Anfitrião remove alguém da sala (libera a vaga; a pessoa precisa pedir para entrar de novo).
+$('peers').onclick = e => {
+  const b = e.target.closest('[data-kick]'); if (!b) return;
+  const id = b.dataset.kick;
+  if (id.startsWith('off:')) { const r = curSaved(); if (r) { r.members = r.members.filter(m => 'off:' + m.uid !== id); saveRooms(); pushRoster(); } return; }
+  // Remover tira da sala e da lista de convidados (precisa pedir de novo para entrar).
+  const p = S.peers.get(id), r = curSaved();
+  if (p && r && p.uid) { r.members = r.members.filter(m => m.uid !== p.uid); saveRooms(); }
+  dropPeer(id, 'foi removido da sala');
+};
+function dropPeer(id, why) {
+  if (!S.peers.delete(id)) return;
+  S.avs.delete(id);
+  invoke('remove_peer', { name: id }).catch(() => {});
+  if (why) toast(`${id} ${why}`);
+  pushRoster();
+}
+
+// ---------- abas Participantes / Pedidos ----------
+function showTab(reqs) {
+  $('tabPeers').classList.toggle('on', !reqs); $('tabReqs').classList.toggle('on', reqs);
+  $('peers').hidden = reqs; $('reqList').hidden = !reqs;
+}
+$('tabPeers').onclick = () => showTab(false);
+$('tabReqs').onclick = () => showTab(true);
 
 // ---------- modais ----------
 const modal = $('modal'), sheet = $('sheet');
@@ -91,88 +242,274 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 function openModal(kind) {
   if (kind === 'new') {
     if (S.role) return toast('Saia da sala atual primeiro');
-    sheet.innerHTML = `<h2>Nova sala</h2><p>Você será o anfitrião. A sala existe só enquanto este app estiver aberto e ninguém entra sem um convite seu.</p>
+    sheet.innerHTML = `<h2>Nova sala</h2><p>Você será o anfitrião. A sala fica salva na barra lateral: depois é só clicar nela para abrir de novo, com o mesmo código, e quem você já aceitou entra direto.</p>
       <label>Nome da sala</label><input class="field" id="fRoom" value="Sala de ${esc(myName())}" maxlength="40">
       <div class="act"><button class="btn ghost" id="x">Cancelar</button><button class="btn pri" id="ok">Criar sala</button></div>`;
     $('x').onclick = closeModal;
-    $('ok').onclick = async () => { S.room = await invoke('create_room', { name: $('fRoom').value.trim() || 'Sala' }); S.role = 'host'; render(); openModal('invite'); };
+    $('ok').onclick = () => openRoom($('fRoom').value.trim() || 'Sala');
+    $('fRoom').onkeydown = e => { if (e.key === 'Enter') $('ok').click(); };
   }
   if (kind === 'invite') {
     if (S.role !== 'host') return;
-    const mins = Math.max(0, Math.round((S.room.expires_at * 1000 - Date.now()) / 60000));
-    sheet.innerHTML = `<h2>Convidar e aprovar</h2>
-      <div class="step"><b>1</b>Envie este convite (expira em ${mins} min)</div>
-      <div class="code" id="inv">${esc(S.room.invite)}</div>
-      <div class="act" style="margin-top:8px;justify-content:flex-start"><button class="btn ghost" id="cp">Copiar convite</button><button class="btn ghost" id="rot">Gerar novo (invalida o atual)</button></div>
-      <div class="step"><b>2</b>Cole o pedido de entrada que a pessoa te devolver</div>
-      <textarea class="field" id="req" placeholder="SLQ-…"></textarea>
-      <div id="reqOut"></div>
-      <div class="act"><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="chk">Verificar pedido</button></div>`;
+    sheet.innerHTML = `<h2>Código da sala</h2><p>Mande este código para quem você quer convidar. A pessoa digita no Lume dela e você clica em Aceitar só na primeira vez; depois ela entra direto sempre que a sala estiver aberta.</p>
+      <div class="bigcode" id="inv">${esc(S.room.code)}</div>
+      <div class="mute" id="relay" style="text-align:center;font-size:12px;margin-top:8px"></div>
+      <div class="act"><button class="btn ghost" id="rot" title="O código antigo para de funcionar para todos">Trocar código</button><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="cp">Copiar código</button></div>`;
     $('x').onclick = closeModal;
-    $('cp').onclick = () => copy(S.room.invite);
-    $('rot').onclick = async () => { S.room = await invoke('new_invite'); openModal('invite'); toast('Convite antigo invalidado'); };
-    $('chk').onclick = async () => {
-      const code = $('req').value.trim();
-      try {
-        const g = { name: await invoke('inspect_request', { code }) };
-        if (S.peers.has(g.name)) throw 'Já existe alguém com esse nome na sala';
-        $('reqOut').innerHTML = `<div class="req"><div class="av">${esc(initials(g.name))}</div><div><b style="font-weight:500">${esc(g.name)}</b><div class="mute">convite válido · quer entrar</div></div>
-          <div class="sp"></div><button class="btn ghost" id="no">Recusar</button><button class="btn pri" id="yes">Aprovar</button></div>`;
-        $('no').onclick = () => { $('reqOut').innerHTML = ''; $('req').value = ''; };
-        $('yes').onclick = () => approveGuest(code, g.name);
-      } catch (err) { toast(String(err)); }
+    $('cp').onclick = () => copy(S.room.code);
+    $('rot').onclick = async () => { const old = curSaved(); S.room = await invoke('new_code'); if (old) { old.code = S.room.code; saveRooms(); } S.reqs.clear(); $('reqs').innerHTML = ''; render(); openModal('invite'); toast('O código antigo parou de funcionar'); };
+    const check = async () => {
+      if (!$('relay')) return;
+      const n = await invoke('relays_online').catch(() => 0);
+      $('relay').textContent = n ? '● Sala aberta para pedidos de entrada' : 'Conectando aos servidores de encontro…';
+      $('relay').style.color = n ? 'var(--good)' : '';
+      if (!n) setTimeout(check, 1000);
     };
+    check();
   }
   if (kind === 'join') {
     if (S.role) return toast('Saia da sala atual primeiro');
-    sheet.innerHTML = `<h2>Entrar com convite</h2><p>São dois códigos trocados com o anfitrião (por qualquer chat). Isso substitui um servidor.</p>
+    sheet.innerHTML = `<h2>Entrar numa sala</h2><p>Digite o código que o anfitrião te mandou.</p>
       <label>Seu nome</label><input class="field" id="jName" value="${esc(myName())}" maxlength="32">
-      <div class="step"><b>1</b>Cole o convite</div><input class="field" id="jInv" placeholder="sl://join/…">
-      <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn pri" id="gen">Gerar pedido de entrada</button></div>
-      <div id="jStep2"></div>
-      <div class="act"><button class="btn ghost" id="x">Cancelar</button></div>`;
-    $('x').onclick = () => { if (S.guestPc && S.role !== 'guest') { S.guestPc.close(); S.guestPc = null; } closeModal(); };
-    $('gen').onclick = guestStart;
+      <label>Código da sala</label><input class="field codein" id="jCode" placeholder="K7QM-2XPD-9RTA" maxlength="20" spellcheck="false" autocomplete="off">
+      <div class="mute" id="jStatus" style="font-size:12px;margin-top:8px;min-height:16px"></div>
+      <div class="act"><button class="btn ghost" id="x">Cancelar</button><button class="btn pri" id="go">Entrar</button></div>`;
+    $('x').onclick = () => { invoke('cancel_join').catch(() => {}); if (S.guestPc && S.role !== 'guest') { S.guestPc.close(); S.guestPc = null; } closeModal(); };
+    $('go').onclick = guestStart;
+    $('jCode').onkeydown = e => { if (e.key === 'Enter') guestStart(); };
+    setTimeout(() => $('jCode') && $('jCode').focus(), 50);
   }
   modal.classList.add('show');
 }
 
-// ---------- ANFITRIÃO (captura, encoder e conexões são nativos, em Rust) ----------
-async function approveGuest(code, name) {
-  $('yes').disabled = true; $('yes').textContent = 'Conectando…';
-  try {
-    const reply = await invoke('approve_request', { code });
-    S.peers.set(name, { state: 'aguardando' });
-    $('reqOut').innerHTML = `<div class="step"><b>3</b>Envie esta resposta para ${esc(name)}</div><div class="code">${esc(reply)}</div>
-      <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn pri" id="cpr">Copiar resposta</button></div>`;
-    $('cpr').onclick = () => copy(reply);
-    $('req').value = '';
-    renderPeers();
-  } catch (err) { toast(String(err)); $('yes').disabled = false; $('yes').textContent = 'Aprovar'; }
+// ---------- pedidos de entrada (anfitrião) ----------
+// Cada pedido aparece como aviso no canto e fica na aba Pedidos até ser aceito, recusado ou a pessoa desistir.
+function renderReqs() {
+  const n = S.reqs.size;
+  $('rCount').textContent = n; $('rCount').classList.toggle('hot', n > 0);
+  $('reqList').innerHTML = n ? [...S.reqs.values()].map(r => `<div class="peer reqrow" data-id="${esc(r.id)}"><div class="av">${avInner(r.name, r.av)}</div><span class="pn">${esc(r.name)}</span>
+    <button class="btn ghost sm" data-a="no">Recusar</button><button class="btn pri sm" data-a="yes">Aceitar</button></div>`).join('')
+    : '<div class="mute" style="padding:8px 0">Nenhum pedido pendente. Quem digitar o código da sala aparece aqui.</div>';
 }
+function forgetReq(id) {
+  S.reqs.delete(id);
+  document.querySelectorAll('.reqcard').forEach(el => { if (el.dataset.id === id) el.remove(); });
+  renderReqs();
+}
+async function answerReq(id, yes, btn) {
+  const r = S.reqs.get(id); if (!r) return;
+  if (!yes) { invoke('deny_request', { id }).catch(() => {}); return forgetReq(id); }
+  if (r.busy) return;
+  r.busy = true;
+  if (btn) { btn.disabled = true; btn.textContent = 'Conectando…'; }
+  try {
+    const who = await invoke('approve_request', { id });
+    S.peers.set(who, { state: 'connecting', live: false, open: false, q: Promise.resolve(), uid: r.uid, av: r.av });
+    if (okAv(r.av)) S.avs.set(who, r.av);
+    renderPeers();
+  } catch (err) { toast(String(err)); }
+  forgetReq(id);
+}
+function onReqClick(e) {
+  const b = e.target.closest('[data-a]'); if (!b) return;
+  const row = b.closest('[data-id]');
+  if (b.dataset.a === 'hide') return row.remove(); // só fecha o aviso; o pedido continua na aba
+  answerReq(row.dataset.id, b.dataset.a === 'yes', b);
+}
+$('reqs').onclick = onReqClick; $('reqList').onclick = onReqClick;
 
-const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
-const STATE_PT = { connected: 'conectado', connecting: 'conectando', new: 'aguardando', disconnected: 'instável', failed: 'falhou', closed: 'saiu' };
-listen('peer-state', ({ payload: [name, st] }) => {
-  const p = S.peers.get(name); if (!p) return;
+listen('join-request', ({ payload: r }) => {
+  if (S.role !== 'host' || S.reqs.has(r.id)) return;
+  r.av = okAv(r.av); S.reqs.set(r.id, r);
+  // Já foi aceito antes nesta sala: entra direto.
+  const known = curSaved() && /^[0-9a-f]{32}$/.test(r.uid || '') && curSaved().members.some(m => m.uid === r.uid);
+  if (known) { toast(`${r.name} voltou para a sala`); return answerReq(r.id, true); }
+  renderReqs();
+  const el = document.createElement('div');
+  el.className = 'reqcard'; el.dataset.id = r.id;
+  el.innerHTML = `<div class="av">${avInner(r.name, r.av)}</div><div><b>${esc(r.name)}</b><small>quer entrar na sala</small></div>
+    <button class="btn ghost sm" data-a="no">Recusar</button><button class="btn pri sm" data-a="yes">Aceitar</button><button class="kick" data-a="hide" title="Decidir depois (fica na aba Pedidos)">✕</button>`;
+  $('reqs').appendChild(el);
+  if (modal.classList.contains('show') && $('inv')) closeModal();
+});
+// Quem desistiu de esperar some da lista.
+setInterval(async () => {
+  if (S.role !== 'host' || !S.reqs.size) return;
+  const alive = await invoke('list_requests').catch(() => null);
+  if (alive) for (const id of [...S.reqs.keys()]) if (!alive.includes(id) && !S.reqs.get(id).busy) forgetReq(id);
+}, 3000);
+
+// ---------- recados da sala ----------
+// Anfitrião -> convidado. Os envios de cada pessoa saem em fila, na ordem.
+function sendPeer(id, obj) {
+  const p = S.peers.get(id); if (!p || !p.open) return;
+  const text = JSON.stringify(obj);
+  p.q = p.q.then(() => invoke('ctl_send', { name: id, text })).catch(() => {});
+}
+function broadcast(obj, except) { for (const id of S.peers.keys()) if (id !== except) sendPeer(id, obj); }
+function sendHost(obj) { if (S.guestDc && S.guestDc.readyState === 'open') S.guestDc.send(JSON.stringify(obj)); }
+function pushRoster() {
+  if (S.role !== 'host') return;
+  broadcast({ t: 'roster', members: roster().filter(m => m.host || m.open || m.off).map(({ id, name, host, live, off }) => ({ id, name, host: !!host, live: !!live, off: !!off })) });
+  refresh();
+}
+function refresh() { renderPeers(); syncStreams(); }
+
+listen('ctl-open', ({ payload: id }) => {
+  const p = S.peers.get(id); if (S.role !== 'host' || !p || p.open) return;
+  p.open = true;
+  sendPeer(id, { t: 'hello', you: id, room: S.room.name });
+  for (const [who, av] of S.avs) if (av && who !== id) sendPeer(id, { t: 'av', id: who, av });
+  if (S.avs.get(id)) broadcast({ t: 'av', id, av: S.avs.get(id) }, id);
+  pushRoster();
+});
+listen('ctl-msg', ({ payload: [id, text] }) => {
+  const p = S.peers.get(id); if (S.role !== 'host' || !p) return;
+  let m; try { m = JSON.parse(text); } catch { return; }
+  if (m.t === 'live') { p.live = !!m.on; pushRoster(); }
+  if (m.t === 'bye') dropPeer(id, 'saiu');
+  if (m.t === 'av') { const av = okAv(m.av); S.avs.set(id, av); rememberMember(p.uid, id, av); broadcast({ t: 'av', id, av }, id); renderPeers(); labelTiles(); }
+  if (m.t === 'sig') {
+    m.from = id; // quem mandou é quem o canal diz que é, não o que veio escrito
+    if (m.to === HOST) onSig(m); else if (S.peers.has(m.to)) sendPeer(m.to, m);
+  }
+});
+listen('peer-state', ({ payload: [id, st] }) => {
+  if (S.role !== 'host') return; // no convidado esses avisos são de quem assiste a tela dele
+  const p = S.peers.get(id); if (!p) return;
   p.state = st;
-  if (st === 'connected') toast(`${name} entrou`);
-  if (st === 'failed' || st === 'closed') { S.peers.delete(name); invoke('remove_peer', { name }).catch(() => {}); toast(`${name} ${st === 'failed' ? 'não conseguiu conectar' : 'saiu'}`); }
+  if (st === 'connected') { toast(`${id} entrou`); rememberMember(p.uid, id, S.avs.get(id) || p.av); }
+  if (st === 'failed' || st === 'closed') return dropPeer(id, st === 'failed' ? 'não conseguiu conectar' : 'saiu');
   renderPeers();
 });
-listen('quality-changed', ({ payload: [name, q] }) => { toast(`${name} ajustou a qualidade`); syncQualityUI(q); });
-listen('enc-stats', ({ payload: s }) => {
-  if (S.role !== 'host') return;
-  $('hres').textContent = `${s.width}×${s.height} · ${s.encoder}`;
-  $('hfps').textContent = Math.round(s.fps) + ' fps';
-  $('sBr').textContent = (s.kbps / 1000).toFixed(1) + ' M';
-});
 
-function syncQualityUI(q) {
-  Object.assign(S.q, q);
-  document.querySelectorAll('.seg').forEach(seg => seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', String(S.q[seg.dataset.k]) === b.dataset.v)));
-  $('br').value = S.q.br; $('brv').textContent = S.q.br + ' Mbps';
+function onHostMsg(text) {
+  let m; try { m = JSON.parse(text); } catch { return; }
+  if (m.t === 'hello') { S.me = String(m.you); S.room = { name: String(m.room || 'Sala').slice(0, 40), code: S.joinCode }; rememberRoom(S.joinCode, S.room.name, 'guest'); render(); }
+  if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off }));
+  if (m.t === 'av') { S.avs.set(String(m.id), okAv(m.av)); labelTiles(); }
+  if (m.t === 'sig') onSig(m);
+  if (S.me) refresh();
 }
+
+// Oferta/resposta de uma conexão entre dois participantes.
+function sendSig(to, kind, sdp) {
+  const m = { t: 'sig', to, kind, sdp };
+  if (S.role === 'host') sendPeer(to, { ...m, from: HOST }); else sendHost(m);
+}
+async function onSig(m) {
+  if (m.kind === 'offer') {
+    // Alguém quer ver a minha tela. (Do anfitrião os convidados já recebem pela conexão de entrada.)
+    if (S.role !== 'guest' || !S.sharing) return;
+    try { sendSig(m.from, 'answer', await invoke('accept_viewer', { name: String(m.from), offerSdp: String(m.sdp) })); } catch {}
+  }
+  if (m.kind === 'answer') {
+    const st = S.streams.get(m.from);
+    if (st && st.pc && st.pc.signalingState === 'have-local-offer') st.pc.setRemoteDescription({ type: 'answer', sdp: String(m.sdp) }).catch(() => {});
+  }
+}
+
+// ---------- telas (grade) ----------
+function makeTile(id) {
+  const el = document.createElement('div');
+  el.className = 'tile'; el.dataset.id = id;
+  el.innerHTML = id === SELF
+    ? `<div class="self"><div><b>Você está transmitindo</b><br><span class="what"></span></div></div><div class="tl"><span class="chip"><span class="dot live"></span><span class="res">—</span></span></div>`
+    : `<video autoplay playsinline></video>
+       <div class="tl"><div class="av"></div><span class="chip"><span class="who"></span><span class="res mute"></span></span></div>
+       <div class="tb"><button data-a="mute" title="Silenciar esta tela">🔊</button><input type="range" min="0" max="100" value="100" title="Volume desta tela">
+       <button data-a="focus" title="Destacar">⤢</button><button data-a="fs" title="Tela cheia">⛶</button></div>`;
+  const v = el.querySelector('video');
+  el.onclick = e => {
+    const b = e.target.closest('[data-a]');
+    if (e.target.closest('input')) return;
+    if (b && b.dataset.a === 'mute') { v.muted = !v.muted; b.classList.toggle('off', v.muted); b.textContent = v.muted ? '🔇' : '🔊'; return; }
+    if (b && b.dataset.a === 'fs') return void (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen());
+    // Clique na tela: destaca (as outras vão para a faixa de baixo). Clique de novo: volta para a grade.
+    S.focus = S.focus === id ? null : id; layoutTiles();
+  };
+  el.ondblclick = e => { if (!e.target.closest('.tb')) document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen(); };
+  const vol = el.querySelector('input');
+  if (vol) vol.oninput = () => { v.volume = vol.value / 100; };
+  return el;
+}
+function attach(st) {
+  const v = st.el.querySelector('video'); if (!v) return;
+  if (v.srcObject !== st.ms) v.srcObject = st.ms;
+  v.play().catch(() => {});
+}
+function labelTiles() {
+  for (const [id, st] of S.streams) {
+    if (id === SELF) { st.el.querySelector('.what').textContent = S.sharing || ''; continue; }
+    st.el.querySelector('.who').textContent = nameOf(id);
+    st.el.querySelector('.av').innerHTML = avInner(nameOf(id), avOf(id));
+  }
+}
+function layoutTiles() {
+  const box = $('tiles');
+  if (S.focus && !S.streams.has(S.focus)) S.focus = null;
+  [...box.children].forEach(el => { const st = S.streams.get(el.dataset.id); if (!st || st.el !== el) el.remove(); });
+  for (const [id, st] of S.streams) { if (st.el.parentNode !== box) box.appendChild(st.el); st.el.classList.toggle('main', id === S.focus); }
+  box.dataset.n = S.streams.size; box.classList.toggle('focus', !!S.focus);
+  box.style.setProperty('--k', Math.max(1, S.streams.size - 1));
+  // Grade: escolhe o número de colunas que deixa as telas (16:9) maiores no espaço que há.
+  let cols = 1, best = 0;
+  const n = S.streams.size, w = $('stage').clientWidth, h = $('stage').clientHeight;
+  for (let c = 1; c <= n; c++) { const a = Math.min(w / c, (h / Math.ceil(n / c)) * 16 / 9); if (a > best) { best = a; cols = c; } }
+  box.style.gridTemplateColumns = S.focus ? '' : `repeat(${cols},minmax(0,1fr))`;
+  $('ph').hidden = S.streams.size > 0;
+  labelTiles();
+}
+
+function closeStream(id) {
+  const st = S.streams.get(id); if (!st) return;
+  S.streams.delete(id); clearTimeout(st.timer);
+  if (st.pc) st.pc.close();
+  const v = st.el.querySelector('video'); if (v) v.srcObject = null;
+}
+function failStream(id, st) {
+  if (S.streams.get(id) !== st) return;
+  closeStream(id); layoutTiles();
+  if (!S.failed.has(id)) toast(`Não foi possível conectar direto com ${nameOf(id)} (rede com NAT restritivo). Tentando de novo…`, 5000);
+  S.failed.set(id, Date.now());
+}
+async function openStream(id) {
+  const st = { id, ms: new MediaStream(), pc: null, el: makeTile(id) };
+  S.streams.set(id, st);
+  // A tela do anfitrião já chega pela conexão de entrada do convidado.
+  if (S.role === 'guest' && id === HOST) { st.ms = S.hostMs; st.viaHost = true; attach(st); return; }
+  const pc = st.pc = recvPc();
+  pc.ontrack = e => { st.ms.addTrack(e.track); tuneReceiver(e.receiver); attach(st); };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') { clearTimeout(st.timer); S.failed.delete(id); }
+    if (pc.connectionState === 'failed') failStream(id, st);
+  };
+  st.timer = setTimeout(() => { if (pc.connectionState !== 'connected') failStream(id, st); }, 25000);
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitIce(pc);
+    if (S.streams.get(id) === st) sendSig(id, 'offer', pc.localDescription.sdp);
+  } catch { failStream(id, st); }
+}
+// Deixa a grade igual à sala: uma tela para cada pessoa que está transmitindo.
+function syncStreams() {
+  if (!S.role || !S.me) return;
+  const want = new Set(roster().filter(m => m.live && m.id !== S.me && (S.role !== 'host' || m.open)).map(m => m.id));
+  for (const id of [...S.streams.keys()]) if (id !== SELF && !want.has(id)) closeStream(id);
+  for (const id of [...S.failed.keys()]) if (!want.has(id)) S.failed.delete(id);
+  for (const id of want) {
+    if (S.streams.has(id)) continue;
+    if (Date.now() - (S.failed.get(id) || 0) < 10000) continue; // falhou há pouco: espera antes de tentar de novo
+    openStream(id);
+  }
+  if (S.sharing && !S.streams.has(SELF)) S.streams.set(SELF, { el: makeTile(SELF) });
+  if (!S.sharing && S.streams.has(SELF)) closeStream(SELF);
+  layoutTiles();
+}
+
+// ---------- transmitir a minha tela ----------
+listen('enc-stats', ({ payload: s }) => { S.enc = s; });
+listen('enc-fallback', () => toast('A placa de vídeo não aceitou codificar; usando a CPU', 4000));
 
 async function openPicker() {
   const [list, procs] = await Promise.all([invoke('list_sources'), invoke('list_processes').catch(() => [])]);
@@ -203,8 +540,8 @@ async function openPicker() {
     $('aEx').hidden = $('aMode').value !== 'except';
     const m = $('aMode').value;
     $('aHint').textContent = m === 'app' ? `Só o som de ${pick.dataset.proc || 'este programa'} vai junto. A call não volta como eco.`
-      : m === 'except' ? 'Tudo que toca no PC vai junto, menos o programa escolhido.'
-      : m === 'all' ? 'Atenção: se você estiver numa call, o pessoal vai se ouvir.' : '';
+      : m === 'except' ? 'Tudo que toca no PC vai junto, menos o programa escolhido e as telas que você assiste no Lume. Se a voz da call ainda vazar, escolha aqui o programa por onde ela sai (ex.: um mixer como Sonar ou Voicemeeter).'
+      : m === 'all' ? 'Atenção: se você estiver numa call, as pessoas vão ouvir a própria voz de volta.' : '';
   };
   sheet.querySelectorAll('.src').forEach(el => el.onclick = () => {
     sheet.querySelectorAll('.src').forEach(x => x.classList.toggle('sel', x === el));
@@ -222,68 +559,70 @@ async function openPicker() {
       try { await invoke('set_audio', { sel: { mode, pid } }); }
       catch (err) { toast('Vídeo ok, mas o áudio falhou: ' + err); }
       S.sharing = pick.dataset.title; closeModal();
-      $('ph').textContent = `Transmitindo: ${S.sharing}`; $('ph').hidden = false;
-      $('share').textContent = '■ Parar'; $('share').className = 'btn red hostOnly';
+      $('share').textContent = '■ Parar'; $('share').className = 'btn red inRoom';
+      announceLive();
     } catch (err) { toast(String(err)); }
   };
   sync();
   modal.classList.add('show');
 }
+function announceLive() {
+  if (S.role === 'host') pushRoster();
+  else { sendHost({ t: 'live', on: !!S.sharing }); refresh(); }
+}
 function stopShare() {
-  if (S.sharing) invoke('stop_share').catch(() => {});
-  S.sharing = null;
-  $('ph').textContent = 'Aguardando transmissão…';
-  $('share').textContent = '▶ Compartilhar tela'; $('share').className = 'btn pri hostOnly';
+  if (S.sharing) {
+    invoke('stop_share').catch(() => {});
+    if (S.role === 'guest') invoke('drop_viewers').catch(() => {});
+  }
+  const was = S.sharing; S.sharing = null; S.enc = null;
+  $('share').textContent = '▶ Compartilhar tela'; $('share').className = 'btn pri inRoom';
+  if (was) announceLive();
 }
 $('share').onclick = () => S.sharing ? stopShare() : openPicker();
 
-// ---------- CONVIDADO ----------
+// ---------- entrar como convidado ----------
 async function guestStart() {
-  const invite = $('jInv').value.trim();
+  const code = $('jCode').value.trim();
   const name = $('jName').value.trim() || 'Convidado';
+  if (code.replace(/[^a-z0-9]/gi, '').length !== 12) return toast('O código tem 12 letras e números');
+  if ($('go').disabled) return;
+  const saved = roomByCode(normCode(code));
+  if ($('jStatus')) $('jStatus').dataset.saved = saved ? '1' : '';
   $('meName').value = name; $('meName').oninput();
-  const pc = new RTCPeerConnection({ iceServers: ICE });
-  const vt = pc.addTransceiver('video', { direction: 'recvonly' });
-  pc.addTransceiver('audio', { direction: 'recvonly' });
-  preferH264(vt);
+  $('go').disabled = true; $('jCode').disabled = true; $('jName').disabled = true;
+  $('jStatus').textContent = 'Preparando a conexão…';
+  const pc = recvPc();
   const dc = pc.createDataChannel('ctl');
-  const remote = new MediaStream();
-  pc.ontrack = e => {
-    remote.addTrack(e.track);
-    if ('jitterBufferTarget' in e.receiver) e.receiver.jitterBufferTarget = 40; // ms, buffer curto
-    $('video').srcObject = remote; $('video').muted = false;
-    e.track.onunmute = () => { $('ph').hidden = remote.getVideoTracks().some(t => !t.muted) ? true : $('ph').hidden; };
-  };
+  const ms = new MediaStream();
+  dc.onopen = () => dc.send(JSON.stringify({ t: 'hi' }));
+  dc.onmessage = e => { if (S.guestPc === pc && typeof e.data === 'string') onHostMsg(e.data); };
+  // O canal fecha na hora quando o anfitrião remove a pessoa ou fecha a sala.
+  dc.onclose = () => { if (S.role === 'guest' && S.guestPc === pc) { toast('O anfitrião encerrou a sua conexão', 5000); leave(); } };
+  pc.ontrack = e => { ms.addTrack(e.track); tuneReceiver(e.receiver); const st = S.streams.get(HOST); if (st) attach(st); };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected') { toast('Conectado'); closeModal(); }
     if (pc.connectionState === 'failed') toast('Não foi possível conectar direto (rede com NAT restritivo)', 5000);
-    if (['failed', 'closed', 'disconnected'].includes(pc.connectionState) && S.role === 'guest' && pc.connectionState !== 'disconnected') leave();
-    renderPeers();
+    if (['failed', 'closed'].includes(pc.connectionState) && S.role === 'guest' && S.guestPc === pc) leave();
   };
   await pc.setLocalDescription(await pc.createOffer());
   await waitIce(pc);
-  let r;
-  try { r = await invoke('make_join_request', { invite, name, offerSdp: pc.localDescription.sdp }); }
-  catch (err) { pc.close(); return toast(String(err)); }
-  S.guestPc = pc; S.guestDc = dc;
-  $('gen').disabled = true;
-  $('jStep2').innerHTML = `<div class="step"><b>2</b>Envie este pedido ao anfitrião</div><div class="code">${esc(r.request)}</div>
-    <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn ghost" id="cpq">Copiar pedido</button></div>
-    <div class="step"><b>3</b>Cole a resposta do anfitrião</div><textarea class="field" id="jRep" placeholder="SLR-…"></textarea>
-    <div class="act" style="justify-content:flex-start;margin-top:8px"><button class="btn pri" id="con">Conectar</button></div>`;
-  $('cpq').onclick = () => copy(r.request);
-  $('con').onclick = async () => {
-    try {
-      const sdp = await invoke('open_reply', { code: $('jRep').value.trim() });
-      await pc.setRemoteDescription({ type: 'answer', sdp });
-      S.role = 'guest'; render(); toast('Conectando…');
-    } catch (err) { toast(String(err)); }
-  };
+  S.guestPc = pc; S.guestDc = dc; S.hostMs = ms;
+  if ($('jStatus')) $('jStatus').textContent = saved ? `Chamando ${saved.name}… Se o anfitrião ainda não abriu a sala, fica esperando.` : 'Pedido enviado. Aguardando o anfitrião aceitar…';
+  try {
+    const sdp = await invoke('join_room', { code, name, av: myAv, uid: myUid, offerSdp: pc.localDescription.sdp });
+    await pc.setRemoteDescription({ type: 'answer', sdp });
+    S.joinCode = normCode(code);
+    S.room = { name: (roomByCode(S.joinCode) || {}).name || '', code: S.joinCode };
+    S.role = 'guest'; render(); closeModal(); toast('Aceito! Conectando…');
+  } catch (err) {
+    pc.close(); if (S.guestPc === pc) S.guestPc = S.guestDc = S.hostMs = null;
+    if (String(err) !== 'Cancelado') toast(String(err), 5000);
+    if ($('jStatus')) { $('jStatus').textContent = ''; $('go').disabled = false; $('jCode').disabled = false; $('jName').disabled = false; }
+  }
 }
 
-$('mute').onclick = () => { const v = $('video'); v.muted = !v.muted; $('mute').classList.toggle('off', v.muted); };
-
-// ---------- painel de qualidade ----------
+// ---------- painel de qualidade (da minha transmissão) ----------
 document.querySelectorAll('.seg').forEach(seg => seg.onclick = e => {
   const b = e.target.closest('button'); if (!b) return;
   seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
@@ -293,61 +632,61 @@ document.querySelectorAll('.seg').forEach(seg => seg.onclick = e => {
 });
 $('br').oninput = () => { S.q.br = +$('br').value; $('brv').textContent = S.q.br + ' Mbps'; };
 $('br').onchange = qualityChanged;
+function qualityChanged() { invoke('set_quality', { quality: S.q }).catch(err => toast(String(err))); }
 
-function qualityChanged() {
-  if (S.role === 'host') invoke('set_quality', { quality: S.q }).catch(err => toast(String(err)));
-  if (S.role === 'guest' && S.guestDc && S.guestDc.readyState === 'open') S.guestDc.send(JSON.stringify({ t: 'quality', ...S.q }));
-}
-
-// ---------- sair / tela cheia ----------
+// ---------- sair ----------
 function leave() {
+  const was = S.role;
+  if (was === 'guest') sendHost({ t: 'bye' });
   stopShare();
-  if (S.role === 'host') invoke('close_room').catch(() => {});
-  S.peers.clear();
+  for (const id of [...S.streams.keys()]) closeStream(id);
+  if (was) invoke('close_room').catch(() => {});
+  $('reqs').innerHTML = '';
+  S.peers.clear(); S.members = []; S.avs.clear(); S.reqs.clear(); S.failed.clear();
   if (S.guestPc) S.guestPc.close();
-  S.guestPc = S.guestDc = null; S.role = null; S.room = null;
-  $('video').srcObject = null; $('ph').hidden = false;
-  ['hres', 'hfps', 'hlat'].forEach(id => $(id).textContent = '—');
-  render();
+  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.me = null; S.focus = null;
+  showTab(false); layoutTiles(); render();
 }
 $('leave').onclick = leave;
-$('fs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : $('stage').requestFullscreen();
 
 // ---------- estatísticas (1x por segundo) ----------
 async function readStats(pc, prev) {
   const r = await pc.getStats(); const out = { t: performance.now() };
   r.forEach(s => {
-    if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') { out.rtt = s.currentRoundTripTime; out.relay = false; }
-    if (s.type === 'outbound-rtp' && s.kind === 'video') { out.bytes = s.bytesSent; out.fps = s.framesPerSecond; out.w = s.frameWidth; out.h = s.frameHeight; out.enc = s.encoderImplementation; }
-    if (s.type === 'inbound-rtp' && s.kind === 'video') { out.bytes = s.bytesReceived; out.fps = s.framesPerSecond; out.w = s.frameWidth; out.h = s.frameHeight; out.lost = s.packetsLost; out.recv = s.packetsReceived; out.dec = s.decoderImplementation; }
-    if (s.type === 'remote-inbound-rtp' && s.kind === 'video') { out.lossFrac = s.fractionLost; }
+    if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') out.rtt = s.currentRoundTripTime;
+    if (s.type === 'inbound-rtp' && s.kind === 'video') { out.bytes = s.bytesReceived; out.fps = s.framesPerSecond; out.w = s.frameWidth; out.h = s.frameHeight; out.lost = s.packetsLost; out.recv = s.packetsReceived; }
   });
   if (prev && out.bytes != null && prev.bytes != null) out.kbps = (out.bytes - prev.bytes) * 8 / (out.t - prev.t);
   return out;
 }
 
 setInterval(async () => {
-  let s = null;
-  if (S.role === 'guest' && S.guestPc) { s = S.guestPc._st = await readStats(S.guestPc, S.guestPc._st); }
-  if (S.role === 'host') {
-    const n = [...S.peers.values()].filter(p => p.state === 'connected').length;
-    $('connState').textContent = n ? `● ${n} conectado${n > 1 ? 's' : ''}` : 'ninguém conectado';
-    $('connState').style.color = n ? 'var(--good)' : '';
-    return;
+  if (!S.role) return;
+  syncStreams(); // também tenta de novo as telas que falharam
+  for (const [id, st] of S.streams) {
+    const res = st.el.querySelector('.res');
+    if (id === SELF) { res.textContent = S.enc ? `${S.enc.width}×${S.enc.height} · ${Math.round(S.enc.fps)} fps · ${S.enc.encoder}` : 'iniciando…'; continue; }
+    const pc = st.viaHost ? S.guestPc : st.pc; if (!pc) continue;
+    st.stats = await readStats(pc, st.stats).catch(() => st.stats);
+    const s = st.stats;
+    res.textContent = s && s.w ? ` · ${s.w}×${s.h} · ${Math.round(s.fps || 0)} fps` : ' · conectando…';
   }
-  const pc = S.guestPc;
-  $('connState').textContent = pc ? ({ connected: '● direta', connecting: 'conectando…', new: 'aguardando', failed: 'falhou', disconnected: 'instável' }[pc.connectionState] || pc.connectionState) : '—';
-  $('connState').style.color = pc && pc.connectionState === 'connected' ? 'var(--good)' : '';
-  if (!s) return;
-  const lat = s.rtt != null ? Math.round(s.rtt * 1000 / 2 + 30) : null; // ~ rede (meio RTT) + captura/encode/decode
+  // O painel Conexão mostra a tela destacada (ou a primeira que estou assistindo).
+  const watched = [...S.streams].filter(([id]) => id !== SELF);
+  const cur = (watched.find(([id]) => id === S.focus) || watched[0] || [])[1];
+  const s = cur && cur.stats;
+  const n = S.role === 'host' ? [...S.peers.values()].filter(p => p.state === 'connected').length : S.members.filter(m => !m.off).length - 1;
+  const ok = S.role === 'host' ? n > 0 : S.guestPc && S.guestPc.connectionState === 'connected';
+  $('connState').textContent = S.role === 'host' ? (n ? `● ${n} conectado${n > 1 ? 's' : ''}` : 'ninguém conectado') : ok ? '● direta' : 'conectando…';
+  $('connState').style.color = ok ? 'var(--good)' : '';
+  const lat = s && s.rtt != null ? Math.round(s.rtt * 1000 / 2 + 30) : null; // ~ rede (meio RTT) + captura/encode/decode
   $('sLat').textContent = lat != null ? lat + ' ms' : '—';
-  $('hlat').textContent = lat != null ? lat + ' ms' : '— ms';
-  $('sBr').textContent = s.kbps != null ? (s.kbps / 1000).toFixed(1) + ' M' : '—';
-  const loss = s.lossFrac != null ? s.lossFrac * 100 : s.recv ? 100 * s.lost / (s.lost + s.recv) : null;
+  const kbps = s && s.kbps != null ? s.kbps : S.enc ? S.enc.kbps : null;
+  $('sBr').textContent = kbps != null ? (kbps / 1000).toFixed(1) + ' M' : '—';
+  const loss = s && s.recv ? 100 * s.lost / (s.lost + s.recv) : null;
   $('sLoss').textContent = loss != null ? loss.toFixed(1) + '%' : '—';
-  if (s.w) $('hres').textContent = `${s.w}×${s.h}` + ((s.enc || s.dec) ? ' · ' + (s.enc || s.dec) : '');
-  if (s.fps != null) $('hfps').textContent = Math.round(s.fps) + ' fps';
 }, 1000);
 
+window.addEventListener('resize', layoutTiles);
 window.addEventListener('beforeunload', leave);
 render();

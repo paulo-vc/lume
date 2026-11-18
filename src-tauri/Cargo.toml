@@ -26,6 +26,8 @@ bytes = "1.12.1"
 async-trait = "0.1.92"
 unsafe-libopus = "0.2.0"
 windows = { version = "0.62.2", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
+rumqttc = { version = "0.25.1", default-features = false }
+chacha20poly1305 = "0.11.0"
 
 [profile.release]
 opt-level = "s"

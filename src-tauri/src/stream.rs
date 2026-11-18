@@ -65,6 +65,8 @@ pub struct Engine {
     pub source_title: Mutex<Option<String>>,
     audio_out: broadcast::Sender<EncodedAudio>,
     audio_stop: Mutex<Option<Arc<AtomicBool>>>,
+    /// canal de controle de cada convidado (anfitrião): recados da sala passam por aqui
+    ctl: Mutex<std::collections::HashMap<String, Arc<dyn DataChannel>>>,
 }
 
 impl Engine {
@@ -81,7 +83,22 @@ impl Engine {
             source_title: Mutex::new(None),
             audio_out,
             audio_stop: Mutex::new(None),
+            ctl: Mutex::new(Default::default()),
         }
+    }
+
+    /// Manda um recado pelo canal de controle de um convidado.
+    pub async fn ctl_send(&self, name: &str, text: &str) -> Result<(), String> {
+        let dc = self.ctl.lock().unwrap().get(name).cloned().ok_or("Essa pessoa não está conectada")?;
+        dc.send_text(text).await.map_err(|e| e.to_string())
+    }
+
+    pub fn ctl_forget(&self, name: &str) {
+        self.ctl.lock().unwrap().remove(name);
+    }
+
+    pub fn ctl_clear(&self) {
+        self.ctl.lock().unwrap().clear();
     }
 
     pub fn set_quality(&self, q: Quality) {
@@ -254,8 +271,15 @@ impl Engine {
         let mut sounds = self.audio_out.subscribe();
         tokio::spawn(async move {
             let mut sending = false;
+            // Quem não conecta em 30 s sai da lista (ex.: o convidado desistiu ou a rede bloqueou).
+            let deadline = tokio::time::sleep(Duration::from_secs(30));
+            tokio::pin!(deadline);
             loop {
                 tokio::select! {
+                    _ = &mut deadline, if !sending => {
+                        (app)("peer-state", serde_json::json!([n, "failed"]));
+                        break;
+                    }
                     st = state_rx.recv() => {
                         let Some(st) = st else { break };
                         (app)("peer-state", serde_json::json!([n, st.to_string()]));
@@ -298,39 +322,41 @@ impl Engine {
             }
         });
 
-        // Canal de controle: convidado pode pedir mudança de qualidade.
+        // Canal de controle: os recados da sala (quem está transmitindo, ofertas entre
+        // participantes) sobem para a interface, que decide o que fazer com eles.
         let (engine, app, n) = (self.clone(), self.app.clone(), name);
         tokio::spawn(async move {
             while let Some(dc) = dc_rx.recv().await {
+                engine.ctl.lock().unwrap().insert(n.clone(), dc.clone());
+                let mut open = false;
                 while let Some(ev) = dc.poll().await {
                     match ev {
+                        DataChannelEvent::OnOpen if !open => {
+                            open = true;
+                            (app)("ctl-open", serde_json::json!(n));
+                        }
                         DataChannelEvent::OnMessage(msg) => {
-                            if let Ok(q) = serde_json::from_slice::<QualityMsg>(&msg.data) {
-                                if q.t == "quality" {
-                                    let q = Quality { res: q.res, fps: q.fps.clamp(5, 60), pri: q.pri, br: q.br.clamp(1, 40) };
-                                    engine.set_quality(q.clone());
-                                    (app)("quality-changed", serde_json::json!([n, q]));
-                                }
+                            if !open {
+                                open = true;
+                                (app)("ctl-open", serde_json::json!(n));
+                            }
+                            if msg.data.len() <= 64 * 1024 {
+                                (app)("ctl-msg", serde_json::json!([n, String::from_utf8_lossy(&msg.data)]));
                             }
                         }
                         DataChannelEvent::OnClose => break,
                         _ => {}
                     }
                 }
+                let mut g = engine.ctl.lock().unwrap();
+                if g.get(&n).is_some_and(|cur| Arc::ptr_eq(cur, &dc)) {
+                    g.remove(&n);
+                }
             }
         });
 
         Ok((pc, sdp))
     }
-}
-
-#[derive(Deserialize)]
-struct QualityMsg {
-    t: String,
-    res: u32,
-    fps: u32,
-    pri: String,
-    br: u32,
 }
 
 #[derive(Clone)]
