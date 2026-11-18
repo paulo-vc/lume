@@ -254,6 +254,7 @@ function openModal(kind) {
     sheet.innerHTML = `<h2>Código da sala</h2><p>Mande este código para quem você quer convidar. A pessoa digita no Lume dela e você clica em Aceitar só na primeira vez; depois ela entra direto sempre que a sala estiver aberta.</p>
       <div class="bigcode" id="inv">${esc(S.room.code)}</div>
       <div class="mute" id="relay" style="text-align:center;font-size:12px;margin-top:8px"></div>
+      <div class="mute" id="netst" style="text-align:center;font-size:12px;margin-top:4px;line-height:1.45"></div>
       <div class="act"><button class="btn ghost" id="rot" title="O código antigo para de funcionar para todos">Trocar código</button><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="cp">Copiar código</button></div>`;
     $('x').onclick = closeModal;
     $('cp').onclick = () => copy(S.room.code);
@@ -266,6 +267,7 @@ function openModal(kind) {
       if (!n) setTimeout(check, 1000);
     };
     check();
+    showNet();
   }
   if (kind === 'join') {
     if (S.role) return toast('Saia da sala atual primeiro');
@@ -280,6 +282,18 @@ function openModal(kind) {
     setTimeout(() => $('jCode') && $('jCode').focus(), 50);
   }
   modal.classList.add('show');
+}
+
+// Como está a rede deste PC para receber conexões (porta aberta no roteador ou CGNAT).
+async function showNet() {
+  const el = $('netst'); if (!el) return;
+  const n = await invoke('net_status').catch(() => null);
+  if (!n || !$('netst')) return;
+  if (n.checking) { el.textContent = 'Verificando o roteador…'; return setTimeout(showNet, 1000); }
+  el.style.color = n.upnp ? 'var(--good)' : '';
+  el.textContent = n.upnp ? '● Roteador abre a porta sozinho: convidados em qualquer rede conseguem conectar'
+    : n.cgnat ? 'Sua internet usa CGNAT. Se o convidado também estiver numa rede restritiva, a conexão direta pode falhar; nesse caso, peça para ele criar a sala.'
+    : 'O roteador não abriu a porta (UPnP desligado). Se algum convidado não conectar, ative o UPnP no roteador ou peça para ele criar a sala.';
 }
 
 // ---------- pedidos de entrada (anfitrião) ----------

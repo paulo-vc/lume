@@ -206,6 +206,12 @@ impl Engine {
         let (dc_tx, mut dc_rx) = tmpsc::channel::<Arc<dyn DataChannel>>(2);
         let handler = Arc::new(Handler { gather_tx, state_tx, dc_tx });
 
+        // Porta aberta no roteador (UPnP) só para esta conexão; se não der, segue sem.
+        let mapping = crate::net::open_port().await;
+        let v4 = match mapping {
+            Some(m) => format!("0.0.0.0:{}", m.port),
+            None => "0.0.0.0:0".to_string(),
+        };
         let runtime = webrtc::runtime::default_runtime().ok_or("runtime indisponível")?;
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
@@ -215,7 +221,7 @@ impl Engine {
                 .with_handler(handler)
                 .with_runtime(runtime)
                 // IPv6 também: muitos provedores (CGNAT no IPv4) dão IPv6 público, que conecta direto.
-                .with_udp_addrs(vec!["0.0.0.0:0".to_string(), "[::]:0".to_string()])
+                .with_udp_addrs(vec![v4, "[::]:0".to_string()])
                 .build()
                 .await
                 .map_err(|x| e(&x))?,
@@ -264,7 +270,10 @@ impl Engine {
         let answer = pc.create_answer(None).await.map_err(|x| e(&x))?;
         pc.set_local_description(answer).await.map_err(|x| e(&x))?;
         let _ = tokio::time::timeout(Duration::from_secs(5), gather_rx.recv()).await;
-        let sdp = pc.local_description().await.ok_or("Falha ao gerar resposta")?.sdp;
+        let mut sdp = pc.local_description().await.ok_or("Falha ao gerar resposta")?.sdp;
+        if let Some(m) = mapping {
+            sdp = crate::net::add_public_candidate(&sdp, m);
+        }
 
         // Estado da conexão -> interface; ao conectar começa a enviar os quadros.
         let (engine, app, n) = (self.clone(), self.app.clone(), name.clone());
@@ -320,6 +329,10 @@ impl Engine {
                         }
                     }
                 }
+            }
+            // Conexão acabou: fecha a porta no roteador.
+            if let Some(m) = mapping {
+                crate::net::close_port(m.port).await;
             }
         });
 

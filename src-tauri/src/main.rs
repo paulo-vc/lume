@@ -4,6 +4,7 @@ mod audio;
 mod capture;
 mod gpu;
 mod mf;
+mod net;
 mod room;
 mod signal;
 mod stream;
@@ -327,6 +328,12 @@ async fn join_room(st: State<'_, AppState>, code: String, name: String, av: Stri
     }
 }
 
+/// Se o roteador abre portas sozinho (UPnP) e se a internet usa CGNAT.
+#[tauri::command]
+async fn net_status() -> net::Status {
+    net::status().await
+}
+
 #[tauri::command]
 fn cancel_join(st: State<AppState>) {
     if let Some(n) = st.guest_cancel.lock().unwrap().take() {
@@ -337,6 +344,7 @@ fn cancel_join(st: State<AppState>) {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            tauri::async_runtime::spawn(net::probe());
             app.manage(AppState {
                 host: Mutex::new(None),
                 guest_cancel: Mutex::new(None),
@@ -369,7 +377,8 @@ fn main() {
             set_audio,
             set_quality,
             join_room,
-            cancel_join
+            cancel_join,
+            net_status
         ])
         .run(tauri::generate_context!())
         .expect("falha ao iniciar o Lume");
