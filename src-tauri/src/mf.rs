@@ -193,6 +193,14 @@ impl HwEncoder {
         }
     }
 
+    /// Muda o bitrate médio (CBR) sem reiniciar o encoder.
+    pub fn set_bitrate(&self, bps: u32) -> bool {
+        match &self.codec {
+            Some(c) => unsafe { c.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var_u4(bps)).is_ok() },
+            None => false,
+        }
+    }
+
     pub fn uses_gpu(&self) -> bool {
         self.dxgi.is_some()
     }

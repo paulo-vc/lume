@@ -19,7 +19,7 @@ use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 pub type Emit = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
@@ -99,6 +99,11 @@ impl Engine {
 
     pub fn ctl_clear(&self) {
         self.ctl.lock().unwrap().clear();
+    }
+
+    /// Qualidade automática: muda o bitrate do encoder na hora, sem reiniciar (sem quadro-chave extra).
+    pub fn set_bitrate(&self, kbps: u32) {
+        AUTO_KBPS.store(kbps, Ordering::SeqCst);
     }
 
     pub fn set_quality(&self, q: Quality) {
@@ -417,8 +422,8 @@ enum VideoEnc {
 
 impl VideoEnc {
     /// `src` é o quadro que chegou da captura (diz se ele está na GPU e o tamanho original).
-    fn new(q: &Quality, w: usize, h: usize, src: &RawFrame, app: &Emit) -> Option<Self> {
-        let (fps, br, gop) = (q.fps, q.br * 1_000_000, q.fps * 3);
+    fn new(q: &Quality, bps: u32, w: usize, h: usize, src: &RawFrame, app: &Emit) -> Option<Self> {
+        let (fps, br, gop) = (q.fps, bps, q.fps * 3);
         if let Some(g) = &src.gpu {
             // Quadro só na GPU: precisa do encoder de hardware lendo texturas.
             if !HW_BROKEN.load(Ordering::SeqCst) {
@@ -443,7 +448,14 @@ impl VideoEnc {
                 }
             }
         }
-        make_encoder(q).map(Self::Sw)
+        make_encoder(q, bps).map(Self::Sw)
+    }
+    /// Troca o bitrate em andamento. false = este encoder não deixa (aí é recriado).
+    fn set_bitrate(&mut self, bps: u32) -> bool {
+        match self {
+            Self::Hw(e, _) => e.set_bitrate(bps),
+            Self::Sw(_) => false,
+        }
     }
     fn name(&self) -> String {
         match self {
@@ -481,10 +493,10 @@ impl VideoEnc {
     }
 }
 
-fn make_encoder(q: &Quality) -> Option<Encoder> {
+fn make_encoder(q: &Quality, bps: u32) -> Option<Encoder> {
     let cfg = EncoderConfig::new()
         .usage_type(UsageType::ScreenContentRealTime)
-        .bitrate(BitRate::from_bps(q.br * 1_000_000))
+        .bitrate(BitRate::from_bps(bps))
         .max_frame_rate(FrameRate::from_hz(q.fps as f32))
         .rate_control_mode(if q.pri == "detail" { RateControlMode::Quality } else { RateControlMode::Bitrate })
         .skip_frames(q.pri != "detail")
@@ -511,7 +523,7 @@ mod tests {
             let f = capture::downscale(&raw, q.res as usize);
             if (f.width, f.height) != dims {
                 dims = (f.width, f.height);
-                enc = make_encoder(&q);
+                enc = make_encoder(&q, q.br * 1_000_000);
             }
             let yuv = YUVBuffer::from_bgra8_source(BgraSliceU8::new(&f.bgra, (f.width, f.height)));
             let out = enc.as_mut().unwrap().encode(&yuv).unwrap().to_vec();
@@ -631,6 +643,18 @@ await pc.setRemoteDescription({type:'answer',sdp:a});})()</script>"#;
     }
 }
 
+/// Bitrate ajustado pela qualidade automática (kbps; 0 = usa o máximo escolhido).
+static AUTO_KBPS: AtomicU32 = AtomicU32::new(0);
+
+/// Bitrate que o encoder deve usar agora: o automático, sem passar do máximo escolhido.
+fn target_bps(q: &Quality) -> u32 {
+    let max = q.br * 1_000_000;
+    match AUTO_KBPS.load(Ordering::SeqCst) {
+        0 => max,
+        k => (k * 1000).clamp(300_000, max),
+    }
+}
+
 fn encode_loop(
     rx: mpsc::Receiver<RawFrame>,
     quality: Arc<Mutex<Quality>>,
@@ -643,6 +667,7 @@ fn encode_loop(
     let mut q = quality.lock().unwrap().clone();
     let mut seen = ver.load(Ordering::SeqCst);
     let mut enc: Option<VideoEnc> = None;
+    let mut applied = 0u32;
     let mut enc_name = String::new();
     let mut last = Instant::now();
     let (mut n, mut bytes, mut window) = (0u32, 0usize, Instant::now());
@@ -676,11 +701,20 @@ fn encode_loop(
             enc = None; // mudança de tamanho (ex.: janela redimensionada)
         }
         if enc.is_none() {
-            enc = VideoEnc::new(&q, out_dims.0, out_dims.1, &f, &app);
+            applied = target_bps(&q);
+            enc = VideoEnc::new(&q, applied, out_dims.0, out_dims.1, &f, &app);
             enc_name = enc.as_ref().map(|e| e.name()).unwrap_or_default();
             idr.store(true, Ordering::SeqCst); // encoder novo começa com quadro-chave
         }
         let Some(e) = enc.as_mut() else { continue };
+        let want = target_bps(&q);
+        if want != applied {
+            applied = want;
+            if !e.set_bitrate(want) {
+                enc = None; // encoder na CPU: recria com o bitrate novo no próximo quadro
+                continue;
+            }
+        }
         if idr.swap(false, Ordering::SeqCst) {
             e.force_idr();
         }

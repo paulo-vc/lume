@@ -289,6 +289,11 @@ fn stop_share(st: State<AppState>) {
 }
 
 #[tauri::command]
+fn set_bitrate(st: State<AppState>, kbps: u32) {
+    st.engine.set_bitrate(kbps);
+}
+
+#[tauri::command]
 fn set_quality(st: State<AppState>, quality: Quality) {
     st.engine.set_quality(quality);
 }
@@ -392,6 +397,7 @@ fn main() {
             list_processes,
             set_audio,
             set_quality,
+            set_bitrate,
             join_room,
             cancel_join,
             net_status,

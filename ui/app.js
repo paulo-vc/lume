@@ -392,6 +392,10 @@ listen('ctl-msg', ({ payload: [id, text] }) => {
   if (m.t === 'live') { p.live = !!m.on; pushRoster(); }
   if (m.t === 'bye') dropPeer(id, 'saiu');
   if (m.t === 'av') { const av = okAv(m.av); S.avs.set(id, av); rememberMember(p.uid, id, av); broadcast({ t: 'av', id, av }, id); renderPeers(); labelTiles(); }
+  if (m.t === 'fb') {
+    const r = { t: 'fb', from: id, loss: +m.loss || 0, fz: +m.fz || 0, jb: +m.jb || 0 };
+    if (m.to === HOST) onFb(r); else if (S.peers.has(m.to)) sendPeer(m.to, r);
+  }
   if (m.t === 'sig') {
     m.from = id; // quem mandou é quem o canal diz que é, não o que veio escrito
     if (m.to === HOST) onSig(m); else if (S.peers.has(m.to)) sendPeer(m.to, m);
@@ -412,6 +416,7 @@ function onHostMsg(text) {
   if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off }));
   if (m.t === 'av') { S.avs.set(String(m.id), okAv(m.av)); labelTiles(); }
   if (m.t === 'sig') onSig(m);
+  if (m.t === 'fb') onFb({ from: String(m.from), loss: +m.loss || 0, fz: +m.fz || 0, jb: +m.jb || 0 });
   if (m.t === 'kick' || m.t === 'closed') S.bye = m.t;
   if (S.me) refresh();
 }
@@ -639,7 +644,7 @@ function stopShare() {
     invoke('stop_share').catch(() => {});
     if (S.role === 'guest') invoke('drop_viewers').catch(() => {});
   }
-  const was = S.sharing; S.sharing = null; S.enc = null;
+  const was = S.sharing; S.sharing = null; S.enc = null; S.fb.clear(); S.rate = 0;
   $('share').textContent = '▶ Compartilhar tela'; $('share').className = 'btn pri inRoom';
   if (was) announceLive();
 }
@@ -706,9 +711,55 @@ document.querySelectorAll('.seg').forEach(seg => seg.onclick = e => {
   S.q[k] = k === 'pri' ? b.dataset.v : +b.dataset.v;
   qualityChanged();
 });
-$('br').oninput = () => { S.q.br = +$('br').value; $('brv').textContent = S.q.br + ' Mbps'; };
+$('br').oninput = () => { S.q.br = +$('br').value; paintRate(); };
 $('br').onchange = qualityChanged;
-function qualityChanged() { invoke('set_quality', { quality: S.q }).catch(err => toast(String(err))); }
+function qualityChanged() { invoke('set_quality', { quality: S.q }).catch(err => toast(String(err))); S.rate = 0; adapt(); }
+
+// ---------- qualidade automática ----------
+// Quem assiste manda a cada 2 s como a imagem está chegando (perda de pacotes, travadas, atraso
+// do buffer). Quem transmite ajusta o bitrate pelo pior relato: cai rápido quando alguém engasga
+// e sobe devagar quando todos estão bem, sem passar do máximo escolhido. O encoder muda na hora.
+S.fb = new Map(); S.rate = 0; S.hold = 0; S.sent = -1;
+try { S.auto = localStorage.getItem('sl.auto') !== '0'; } catch { S.auto = true; }
+function feedback(id, a, b) {
+  if (!a || !b || id === SELF || b.recv == null || a.recv == null) return;
+  const recv = b.recv - a.recv, lost = Math.max(0, b.lost - a.lost);
+  if (recv + lost < 20) return; // tela parada: pouco para medir
+  const r = { t: 'fb', to: id, loss: +(lost / (recv + lost)).toFixed(3), fz: Math.max(0, b.fz - a.fz), jb: b.jbe > a.jbe ? Math.round((b.jbd - a.jbd) / (b.jbe - a.jbe) * 1000) : 0 };
+  if (S.role === 'host') sendPeer(id, { ...r, from: HOST });
+  else sendHost(r);
+}
+function onFb(r) { if (S.sharing) S.fb.set(r.from, { ...r, at: Date.now() }); }
+function adapt() {
+  const max = S.q.br * 1000;
+  let target = 0;
+  if (S.auto && S.sharing) {
+    const now = Date.now();
+    const fresh = [...S.fb.values()].filter(f => now - f.at < 7000);
+    let cur = S.rate || max;
+    if (fresh.some(f => f.loss > 0.03 || f.fz > 0 || f.jb > 250)) { cur = Math.max(300, cur * 0.7); S.hold = now; }
+    else if (fresh.every(f => f.loss < 0.01 && f.jb < 150) && now - S.hold > 6000) cur = Math.min(max, cur * 1.15);
+    S.rate = Math.round(Math.min(cur, max));
+    target = S.rate >= max ? 0 : S.rate;
+  } else S.rate = 0;
+  if (target !== S.sent) { S.sent = target; invoke('set_bitrate', { kbps: target }).catch(() => {}); }
+  paintRate();
+}
+function paintRate() {
+  $('autoSeg').querySelectorAll('button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === S.auto));
+  $('brl').textContent = S.auto ? 'Bitrate máx.' : 'Bitrate';
+  const now = S.auto && S.sharing && S.rate && S.rate < S.q.br * 1000;
+  $('brv').textContent = now ? `${(S.rate / 1000).toFixed(1)} de ${S.q.br} Mbps` : `${S.q.br} Mbps`;
+  $('brv').title = now ? 'Reduzido automaticamente porque a conexão de alguém está engasgando' : '';
+}
+$('autoSeg').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.auto = b.dataset.v === '1';
+  try { localStorage.setItem('sl.auto', S.auto ? '1' : '0'); } catch {}
+  S.rate = 0; adapt();
+};
+setInterval(adapt, 2000);
+paintRate();
 
 // ---------- sair ----------
 function leave() {
@@ -732,7 +783,7 @@ async function readStats(pc, prev) {
   const r = await pc.getStats(); const out = { t: performance.now() };
   r.forEach(s => {
     if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') out.rtt = s.currentRoundTripTime;
-    if (s.type === 'inbound-rtp' && s.kind === 'video') { out.bytes = s.bytesReceived; out.fps = s.framesPerSecond; out.w = s.frameWidth; out.h = s.frameHeight; out.lost = s.packetsLost; out.recv = s.packetsReceived; }
+    if (s.type === 'inbound-rtp' && s.kind === 'video') { out.bytes = s.bytesReceived; out.fps = s.framesPerSecond; out.w = s.frameWidth; out.h = s.frameHeight; out.lost = s.packetsLost; out.recv = s.packetsReceived; out.fz = s.freezeCount || 0; out.jbd = s.jitterBufferDelay || 0; out.jbe = s.jitterBufferEmittedCount || 0; }
   });
   if (prev && out.bytes != null && prev.bytes != null) out.kbps = (out.bytes - prev.bytes) * 8 / (out.t - prev.t);
   return out;
@@ -745,7 +796,9 @@ setInterval(async () => {
     const res = st.el.querySelector('.res');
     if (id === SELF) { res.textContent = S.enc ? `${S.enc.width}×${S.enc.height} · ${Math.round(S.enc.fps)} fps · ${S.enc.encoder}` : 'iniciando…'; continue; }
     const pc = st.viaHost ? S.guestPc : st.pc; if (!pc) continue;
-    st.stats = await readStats(pc, st.stats).catch(() => st.stats);
+    const prev = st.stats;
+    st.stats = await readStats(pc, prev).catch(() => prev);
+    feedback(id, prev, st.stats);
     const s = st.stats;
     res.textContent = s && s.w ? ` · ${s.w}×${s.h} · ${Math.round(s.fps || 0)} fps` : ' · conectando…';
   }
