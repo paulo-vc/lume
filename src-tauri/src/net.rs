@@ -35,22 +35,57 @@ fn is_cgnat(ip: Ipv4Addr) -> bool {
     ip.is_private() || ip.is_loopback() || ip.is_unspecified() || (o[0] == 100 && (o[1] & 0xc0) == 64)
 }
 
+/// IP deste PC na rede de casa (a que tem o roteador). VPNs como Radmin e Hamachi usam faixas
+/// que não são de rede local (26.x, 25.x), então ficam de fora.
+fn home_ip() -> Option<Ipv4Addr> {
+    let lan = |ip: Ipv4Addr| ip.is_private() && !ip.is_link_local();
+    // O IP que o Windows usaria para sair para a internet.
+    let routed = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| s.connect("1.1.1.1:80").map(|_| s))
+        .and_then(|s| s.local_addr())
+        .ok()
+        .and_then(|a| match a.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            _ => None,
+        });
+    if let Some(ip) = routed.filter(|ip| lan(*ip)) {
+        return Some(ip);
+    }
+    local_ip_address::list_afinet_netifas().ok()?.into_iter().find_map(|(_, ip)| match ip {
+        IpAddr::V4(ip) if lan(ip) => Some(ip),
+        _ => None,
+    })
+}
+
 /// Procura o roteador (uma vez; chamado na abertura do app).
 pub async fn probe() {
     let mut st = STATE.lock().await;
     if st.done {
         return;
     }
-    st.local = match local_ip_address::local_ip() {
-        Ok(IpAddr::V4(ip)) => Some(ip),
-        _ => None,
+    st.local = home_ip();
+    // Busca pela placa que sai para a internet (não por VPNs como Radmin/Hamachi, que também
+    // respondem e não têm nada a ver com o roteador de casa).
+    let Some(local) = st.local else {
+        st.done = true;
+        return;
     };
-    let opts = SearchOptions { timeout: Some(Duration::from_secs(4)), ..Default::default() };
+    let opts = SearchOptions {
+        bind_addr: SocketAddr::new(IpAddr::V4(local), 0),
+        timeout: Some(Duration::from_secs(4)),
+        ..Default::default()
+    };
     if let Ok(gw) = search_gateway(opts).await {
-        if let Ok(IpAddr::V4(ext)) = gw.get_external_ip().await {
-            st.external = Some(ext);
+        let same_net = match gw.addr.ip() {
+            IpAddr::V4(g) => g.octets()[..3] == local.octets()[..3],
+            _ => false,
+        };
+        if same_net {
+            if let Ok(IpAddr::V4(ext)) = gw.get_external_ip().await {
+                st.external = Some(ext);
+            }
+            st.gw = Some(gw);
         }
-        st.gw = Some(gw);
     }
     st.done = true;
 }
@@ -152,6 +187,12 @@ mod tests {
     fn upnp_here() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
+            let opts = SearchOptions { timeout: Some(Duration::from_secs(6)), ..Default::default() };
+            match search_gateway(opts).await {
+                Ok(gw) => println!("qualquer placa: {} ip externo: {:?}", gw.addr, gw.get_external_ip().await),
+                Err(e) => println!("qualquer placa: {e}"),
+            }
+            println!("ip local: {:?} (rede de casa: {:?})", local_ip_address::local_ip(), home_ip());
             probe().await;
             println!("status: upnp={} cgnat={}", status().await.upnp, status().await.cgnat);
             if let Some(m) = open_port().await {

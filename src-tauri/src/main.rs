@@ -328,6 +328,22 @@ async fn join_room(st: State<'_, AppState>, code: String, name: String, av: Stri
     }
 }
 
+#[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Abre no navegador o download da versão mais nova (endereço fixo; a página não escolhe o link).
+#[tauri::command]
+fn open_update() {
+    use windows::core::w;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    unsafe {
+        ShellExecuteW(None, w!("open"), w!("https://github.com/paulo-vc/lume/releases/latest/download/Lume.exe"), None, None, SW_SHOWNORMAL);
+    }
+}
+
 /// Se o roteador abre portas sozinho (UPnP) e se a internet usa CGNAT.
 #[tauri::command]
 async fn net_status() -> net::Status {
@@ -378,7 +394,9 @@ fn main() {
             set_quality,
             join_room,
             cancel_join,
-            net_status
+            net_status,
+            app_version,
+            open_update
         ])
         .run(tauri::generate_context!())
         .expect("falha ao iniciar o Lume");

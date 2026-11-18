@@ -207,7 +207,8 @@ impl Engine {
         let handler = Arc::new(Handler { gather_tx, state_tx, dc_tx });
 
         // Porta aberta no roteador (UPnP) só para esta conexão; se não der, segue sem.
-        let mapping = crate::net::open_port().await;
+        // (A prévia local, "@preview", não precisa.)
+        let mapping = if name.starts_with('@') { None } else { crate::net::open_port().await };
         let v4 = match mapping {
             Some(m) => format!("0.0.0.0:{}", m.port),
             None => "0.0.0.0:0".to_string(),

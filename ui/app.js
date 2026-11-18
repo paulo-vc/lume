@@ -159,16 +159,18 @@ function roster() {
     const list = [{ id: HOST, name: myName(), host: true, live: !!S.sharing }];
     for (const [id, p] of S.peers) list.push({ id, name: id, live: !!p.live, state: p.state, open: p.open, uid: p.uid });
     const r = curSaved();
-    if (r) for (const m of r.members) if (!list.some(x => x.uid === m.uid || x.name === m.name)) list.push({ id: 'off:' + m.uid, name: m.name, off: true, uid: m.uid });
+    if (r) for (const m of r.members) if (!list.some(x => x.uid === m.uid || x.name === m.name)) list.push({ id: offId(r, m), name: m.name, off: true, uid: m.uid });
     return list;
   }
   return S.role === 'guest' ? S.members : [];
 }
 function nameOf(id) { if (id === SELF || id === S.me) return 'Você'; const m = roster().find(m => m.id === id); return m ? m.name : id; }
+// Id de quem está fora da sala na lista que vai para os convidados: não expõe o uid (que libera a entrada direta).
+function offId(r, m) { return 'off:' + r.members.indexOf(m); }
 function avOf(id) {
   if (id === SELF || id === S.me) return myAv;
   if (S.avs.get(id)) return S.avs.get(id);
-  const r = curSaved(), m = r && String(id).startsWith('off:') && r.members.find(m => 'off:' + m.uid === id);
+  const r = curSaved(), m = r && String(id).startsWith('off:') && r.members.find(m => offId(r, m) === id);
   return m ? m.av : '';
 }
 
@@ -210,18 +212,20 @@ function renderPeers() {
 $('peers').onclick = e => {
   const b = e.target.closest('[data-kick]'); if (!b) return;
   const id = b.dataset.kick;
-  if (id.startsWith('off:')) { const r = curSaved(); if (r) { r.members = r.members.filter(m => 'off:' + m.uid !== id); saveRooms(); pushRoster(); } return; }
+  if (id.startsWith('off:')) { const r = curSaved(); if (r) { r.members = r.members.filter(m => offId(r, m) !== id); saveRooms(); pushRoster(); } return; }
   // Remover tira da sala e da lista de convidados (precisa pedir de novo para entrar).
   const p = S.peers.get(id), r = curSaved();
   if (p && r && p.uid) { r.members = r.members.filter(m => m.uid !== p.uid); saveRooms(); }
-  dropPeer(id, 'foi removido da sala');
+  sendPeer(id, { t: 'kick' });
+  setTimeout(() => dropPeer(id, 'foi removido da sala'), 300); // dá tempo do aviso chegar
 };
 function dropPeer(id, why) {
-  if (!S.peers.delete(id)) return;
+  if (!S.peers.delete(id)) return Promise.resolve();
   S.avs.delete(id);
-  invoke('remove_peer', { name: id }).catch(() => {});
+  const done = invoke('remove_peer', { name: id }).catch(() => {});
   if (why) toast(`${id} ${why}`);
   pushRoster();
+  return done;
 }
 
 // ---------- abas Participantes / Pedidos ----------
@@ -337,7 +341,12 @@ listen('join-request', ({ payload: r }) => {
   r.av = okAv(r.av); S.reqs.set(r.id, r);
   // Já foi aceito antes nesta sala: entra direto.
   const known = curSaved() && /^[0-9a-f]{32}$/.test(r.uid || '') && curSaved().members.some(m => m.uid === r.uid);
-  if (known) { toast(`${r.name} voltou para a sala`); return answerReq(r.id, true); }
+  if (known) {
+    // Caiu e voltou: a conexão velha dele pode ainda constar aqui; tira antes, para não virar "Nome (2)".
+    const old = [...S.peers].filter(([, p]) => p.uid === r.uid).map(([pid]) => dropPeer(pid));
+    toast(`${r.name} voltou para a sala`);
+    return Promise.all(old).then(() => answerReq(r.id, true));
+  }
   renderReqs();
   const el = document.createElement('div');
   el.className = 'reqcard'; el.dataset.id = r.id;
@@ -403,6 +412,7 @@ function onHostMsg(text) {
   if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off }));
   if (m.t === 'av') { S.avs.set(String(m.id), okAv(m.av)); labelTiles(); }
   if (m.t === 'sig') onSig(m);
+  if (m.t === 'kick' || m.t === 'closed') S.bye = m.t;
   if (S.me) refresh();
 }
 
@@ -428,7 +438,9 @@ function makeTile(id) {
   const el = document.createElement('div');
   el.className = 'tile'; el.dataset.id = id;
   el.innerHTML = id === SELF
-    ? `<div class="self"><div><b>Você está transmitindo</b><br><span class="what"></span></div></div><div class="tl"><span class="chip"><span class="dot live"></span><span class="res">—</span></span></div>`
+    ? `<video autoplay playsinline muted></video><div class="self"><div><b>Você está transmitindo</b><br><span class="what"></span></div></div>
+       <div class="tl"><span class="chip"><span class="dot live"></span><span class="res">—</span></span></div>
+       <div class="tb"><button data-a="preview" title="Mostrar/ocultar a prévia da sua tela">👁</button><button data-a="focus" title="Destacar">⤢</button><button data-a="fs" title="Tela cheia">⛶</button></div>`
     : `<video autoplay playsinline></video>
        <div class="tl"><div class="av"></div><span class="chip"><span class="who"></span><span class="res mute"></span></span></div>
        <div class="tb"><button data-a="mute" title="Silenciar esta tela">🔊</button><input type="range" min="0" max="100" value="100" title="Volume desta tela">
@@ -437,6 +449,7 @@ function makeTile(id) {
   el.onclick = e => {
     const b = e.target.closest('[data-a]');
     if (e.target.closest('input')) return;
+    if (b && b.dataset.a === 'preview') { setPreview(!S.preview); return; }
     if (b && b.dataset.a === 'mute') { v.muted = !v.muted; b.classList.toggle('off', v.muted); b.textContent = v.muted ? '🔇' : '🔊'; return; }
     if (b && b.dataset.a === 'fs') return void (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen());
     // Clique na tela: destaca (as outras vão para a faixa de baixo). Clique de novo: volta para a grade.
@@ -478,6 +491,7 @@ function layoutTiles() {
 function closeStream(id) {
   const st = S.streams.get(id); if (!st) return;
   S.streams.delete(id); clearTimeout(st.timer);
+  if (id === SELF) stopPreview(st);
   if (st.pc) st.pc.close();
   const v = st.el.querySelector('video'); if (v) v.srcObject = null;
 }
@@ -516,9 +530,45 @@ function syncStreams() {
     if (Date.now() - (S.failed.get(id) || 0) < 10000) continue; // falhou há pouco: espera antes de tentar de novo
     openStream(id);
   }
-  if (S.sharing && !S.streams.has(SELF)) S.streams.set(SELF, { el: makeTile(SELF) });
+  if (S.sharing && !S.streams.has(SELF)) { const st = { el: makeTile(SELF) }; S.streams.set(SELF, st); if (S.preview) startPreview(st); paintPreview(st); }
   if (!S.sharing && S.streams.has(SELF)) closeStream(SELF);
   layoutTiles();
+}
+
+// ---------- prévia da minha tela ----------
+// A prévia é uma conexão local com o próprio Lume: mostra exatamente o que os outros recebem
+// (mesma imagem codificada), decodificada pela placa de vídeo. Desligada, fica só o quadro preto.
+try { S.preview = localStorage.getItem('sl.preview') !== '0'; } catch { S.preview = true; }
+const PREVIEW = '@preview';
+async function startPreview(st) {
+  if (st.pc) return;
+  const pc = st.pc = recvPc();
+  st.ms = new MediaStream();
+  pc.ontrack = e => { if (e.track.kind === 'video') { st.ms.addTrack(e.track); tuneReceiver(e.receiver); attach(st); } };
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitIce(pc, 1500);
+    const sdp = await invoke('accept_viewer', { name: PREVIEW, offerSdp: pc.localDescription.sdp });
+    if (st.pc === pc) await pc.setRemoteDescription({ type: 'answer', sdp });
+  } catch { if (st.pc === pc) { pc.close(); st.pc = null; } }
+}
+function stopPreview(st) {
+  if (!st.pc) return;
+  st.pc.close(); st.pc = null;
+  const v = st.el.querySelector('video'); if (v) v.srcObject = null;
+  invoke('remove_peer', { name: PREVIEW }).catch(() => {});
+}
+function paintPreview(st) {
+  st.el.querySelector('.self').hidden = S.preview;
+  const b = st.el.querySelector('[data-a=preview]');
+  b.classList.toggle('off', !S.preview); b.title = S.preview ? 'Ocultar a prévia (economiza um pouco de placa de vídeo)' : 'Mostrar a prévia da sua tela';
+}
+function setPreview(on) {
+  S.preview = on;
+  try { localStorage.setItem('sl.preview', on ? '1' : '0'); } catch {}
+  const st = S.streams.get(SELF); if (!st) return;
+  on ? startPreview(st) : stopPreview(st);
+  paintPreview(st);
 }
 
 // ---------- transmitir a minha tela ----------
@@ -612,12 +662,12 @@ async function guestStart() {
   dc.onopen = () => dc.send(JSON.stringify({ t: 'hi' }));
   dc.onmessage = e => { if (S.guestPc === pc && typeof e.data === 'string') onHostMsg(e.data); };
   // O canal fecha na hora quando o anfitrião remove a pessoa ou fecha a sala.
-  dc.onclose = () => { if (S.role === 'guest' && S.guestPc === pc) { toast('O anfitrião encerrou a sua conexão', 5000); leave(); } };
+  dc.onclose = () => { if (S.role === 'guest' && S.guestPc === pc) lost(); };
   pc.ontrack = e => { ms.addTrack(e.track); tuneReceiver(e.receiver); const st = S.streams.get(HOST); if (st) attach(st); };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected') { toast('Conectado'); closeModal(); }
     if (pc.connectionState === 'failed') toast('Não foi possível conectar direto (rede com NAT restritivo)', 5000);
-    if (['failed', 'closed'].includes(pc.connectionState) && S.role === 'guest' && S.guestPc === pc) leave();
+    if (['failed', 'closed'].includes(pc.connectionState) && S.role === 'guest' && S.guestPc === pc) lost();
   };
   await pc.setLocalDescription(await pc.createOffer());
   await waitIce(pc);
@@ -636,6 +686,18 @@ async function guestStart() {
   }
 }
 
+// Saí da sala sem querer: se foi expulso ou a sala fechou, avisa; se a conexão caiu, volta sozinho
+// (quem já foi aceito entra direto, então o anfitrião nem precisa clicar).
+function lost() {
+  const bye = S.bye, code = S.joinCode;
+  leave();
+  if (bye === 'kick') return toast('O anfitrião removeu você da sala', 5000);
+  if (bye === 'closed') return toast('O anfitrião fechou a sala', 5000);
+  if (!code) return toast('A conexão com a sala caiu', 5000);
+  toast('A conexão caiu. Reconectando…', 4000);
+  setTimeout(() => { if (S.role) return; openModal('join'); $('jCode').value = code; guestStart(); }, 1500);
+}
+
 // ---------- painel de qualidade (da minha transmissão) ----------
 document.querySelectorAll('.seg').forEach(seg => seg.onclick = e => {
   const b = e.target.closest('button'); if (!b) return;
@@ -652,13 +714,15 @@ function qualityChanged() { invoke('set_quality', { quality: S.q }).catch(err =>
 function leave() {
   const was = S.role;
   if (was === 'guest') sendHost({ t: 'bye' });
+  if (was === 'host') broadcast({ t: 'closed' });
   stopShare();
   for (const id of [...S.streams.keys()]) closeStream(id);
-  if (was) invoke('close_room').catch(() => {});
+  // O anfitrião espera o aviso "sala fechada" sair antes de derrubar as conexões.
+  if (was) setTimeout(() => { if (!S.role) invoke('close_room').catch(() => {}); }, was === 'host' ? 400 : 0);
   $('reqs').innerHTML = '';
   S.peers.clear(); S.members = []; S.avs.clear(); S.reqs.clear(); S.failed.clear();
   if (S.guestPc) S.guestPc.close();
-  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.me = null; S.focus = null;
+  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.bye = null; S.me = null; S.focus = null;
   showTab(false); layoutTiles(); render();
 }
 $('leave').onclick = leave;
@@ -700,6 +764,29 @@ setInterval(async () => {
   const loss = s && s.recv ? 100 * s.lost / (s.lost + s.recv) : null;
   $('sLoss').textContent = loss != null ? loss.toFixed(1) + '%' : '—';
 }, 1000);
+
+// ---------- aviso de versão nova ----------
+// Só consulta a página pública de lançamentos do projeto; nada sobre você é enviado.
+function newer(a, b) {
+  const p = v => String(v).replace(/^v/, '').split(/[.-]/).map(x => parseInt(x, 10) || 0);
+  const [x, y] = [p(a), p(b)];
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+}
+async function checkUpdate() {
+  try {
+    const cur = await invoke('app_version');
+    const r = await fetch('https://api.github.com/repos/paulo-vc/lume/releases/latest', { headers: { Accept: 'application/vnd.github+json' }, credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!r.ok) return;
+    const tag = String((await r.json()).tag_name || '');
+    if (!/^v?\d+\.\d+\.\d+$/.test(tag) || !newer(tag, cur)) return;
+    $('updVer').textContent = `${tag.replace(/^v/, '')} (você tem ${cur})`;
+    $('update').hidden = false;
+  } catch {}
+}
+$('updGo').onclick = () => { invoke('open_update').catch(() => {}); toast('Baixando no navegador. Feche o Lume e abra o arquivo novo.', 5000); };
+setTimeout(checkUpdate, 3000);
+setInterval(checkUpdate, 6 * 3600 * 1000);
 
 window.addEventListener('resize', layoutTiles);
 window.addEventListener('beforeunload', leave);
