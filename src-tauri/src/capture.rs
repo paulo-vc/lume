@@ -61,15 +61,21 @@ pub fn list_sources() -> Vec<Source> {
     out
 }
 
+#[derive(Clone)]
 pub struct RawFrame {
+    /// pixels na memória (vazio quando o quadro está só na placa de vídeo)
     pub bgra: Vec<u8>,
     pub width: usize,
     pub height: usize,
+    pub gpu: Option<crate::gpu::GpuFrame>,
 }
 
 pub struct Handler {
     tx: SyncSender<RawFrame>,
     scratch: Vec<u8>,
+    /// o dispositivo da captura serve também para converter e codificar
+    gpu_ok: bool,
+    ring: crate::gpu::CopyRing,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
@@ -77,15 +83,25 @@ impl GraphicsCaptureApiHandler for Handler {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self { tx: ctx.flags, scratch: Vec::new() })
+        let gpu_ok = crate::gpu::prepare_device(&ctx.device);
+        Ok(Self { tx: ctx.flags, scratch: Vec::new(), gpu_ok, ring: crate::gpu::CopyRing::new() })
     }
 
     fn on_frame_arrived(&mut self, frame: &mut Frame, _c: InternalCaptureControl) -> Result<(), Self::Error> {
+        if self.gpu_ok && !crate::gpu::disabled() {
+            // Só uma cópia de textura dentro da placa de vídeo; nada vem para a memória.
+            let (w, h) = (frame.width() as usize, frame.height() as usize);
+            let (dev, ctx) = (frame.device().clone(), frame.device_context().clone());
+            if let Ok(g) = self.ring.copy(&dev, &ctx, frame.as_raw_texture()) {
+                let _ = self.tx.try_send(RawFrame { bgra: vec![], width: w, height: h, gpu: Some(g) });
+                return Ok(());
+            }
+        }
         let buf = frame.buffer()?;
         let (w, h) = (buf.width() as usize, buf.height() as usize);
         let data = buf.as_nopadding_buffer(&mut self.scratch).to_vec();
         // try_send: se o encoder estiver ocupado o quadro é descartado (nunca acumula atraso).
-        let _ = self.tx.try_send(RawFrame { bgra: data, width: w, height: h });
+        let _ = self.tx.try_send(RawFrame { bgra: data, width: w, height: h, gpu: None });
         Ok(())
     }
 
@@ -138,11 +154,9 @@ pub fn start(source_id: &str, fps: u32, tx: SyncSender<RawFrame>) -> Result<Cont
 /// Reduz a resolução (média 2x2 quando possível, senão vizinho mais próximo). Mantém dimensões pares.
 pub fn downscale(f: &RawFrame, max_h: usize) -> RawFrame {
     let (sw, sh) = (f.width, f.height);
-    let (mut dw, mut dh) = if max_h == 0 || sh <= max_h { (sw, sh) } else { (sw * max_h / sh, max_h) };
-    dw &= !1;
-    dh &= !1;
+    let (dw, dh) = crate::gpu::target_dims(sw, sh, max_h);
     if dw == sw && dh == sh {
-        return RawFrame { bgra: f.bgra.clone(), width: sw, height: sh };
+        return f.clone();
     }
     let mut out = vec![0u8; dw * dh * 4];
     let half = sw == dw * 2 && sh == dh * 2;
@@ -162,5 +176,5 @@ pub fn downscale(f: &RawFrame, max_h: usize) -> RawFrame {
             }
         }
     }
-    RawFrame { bgra: out, width: dw, height: dh }
+    RawFrame { bgra: out, width: dw, height: dh, gpu: None }
 }

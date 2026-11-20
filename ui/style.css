@@ -48,6 +48,10 @@ button{font:inherit;color:inherit}
 .room .kick{opacity:0}
 .room:hover .kick{opacity:1}
 .roomsEmpty{color:var(--mute);font-size:12.5px;padding:10px 6px;line-height:1.5}
+.update{display:flex;align-items:center;gap:10px;padding:12px;border-radius:var(--r);background:var(--card);border:1px solid var(--line)}
+.update div{flex:1;min-width:0}
+.update b{display:block;font-size:13px;font-weight:600}
+.update small{font-size:11.5px;color:var(--mute)}
 .sideAct{display:grid;gap:8px}
 .sideAct .btn{width:100%}
 

@@ -5,6 +5,8 @@
 use std::mem::ManuallyDrop;
 use std::time::{Duration, Instant};
 use windows::core::{Interface, GUID, PWSTR};
+use windows::Win32::Foundation::E_NOTIMPL;
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4};
@@ -34,6 +36,8 @@ pub struct HwEncoder {
     out_id: u32,
     nv12: Vec<u8>,
     pub name: String,
+    /// quando recebe texturas da placa de vídeo direto (sem passar pela CPU)
+    dxgi: Option<IMFDXGIDeviceManager>,
 }
 
 // Usado só pela thread do encoder.
@@ -82,10 +86,11 @@ pub fn hardware_encoders() -> Vec<(String, IMFActivate)> {
 
 impl HwEncoder {
     /// Tenta cada encoder de hardware até um aceitar a configuração.
-    pub fn new(width: usize, height: usize, fps: u32, bitrate_bps: u32, gop: u32) -> Result<Self, String> {
+    /// Com `dev`, o encoder lê texturas NV12 desse dispositivo (caminho todo na GPU).
+    pub fn new(width: usize, height: usize, fps: u32, bitrate_bps: u32, gop: u32, dev: Option<&ID3D11Device>) -> Result<Self, String> {
         let mut last = "nenhum encoder de hardware encontrado".to_string();
         for (name, act) in hardware_encoders() {
-            match unsafe { Self::open(&act, &name, width, height, fps, bitrate_bps, gop) } {
+            match unsafe { Self::open(&act, &name, width, height, fps, bitrate_bps, gop, dev) } {
                 Ok(e) => return Ok(e),
                 Err(e) => {
                     last = format!("{name}: {e}");
@@ -98,7 +103,8 @@ impl HwEncoder {
         Err(last)
     }
 
-    unsafe fn open(act: &IMFActivate, name: &str, width: usize, height: usize, fps: u32, bitrate: u32, gop: u32) -> windows::core::Result<Self> {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn open(act: &IMFActivate, name: &str, width: usize, height: usize, fps: u32, bitrate: u32, gop: u32, dev: Option<&ID3D11Device>) -> windows::core::Result<Self> {
         let mft: IMFTransform = act.ActivateObject()?;
         let attrs = mft.GetAttributes()?;
         let is_async = attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 0;
@@ -106,6 +112,21 @@ impl HwEncoder {
             attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
         }
         let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+        let dxgi = match dev {
+            Some(dev) => {
+                if attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) == 0 {
+                    return Err(windows::core::Error::new(E_NOTIMPL, "encoder sem suporte a texturas D3D11"));
+                }
+                let mut token = 0u32;
+                let mut mgr = None;
+                MFCreateDXGIDeviceManager(&mut token, &mut mgr)?;
+                let mgr = mgr.unwrap();
+                mgr.ResetDevice(dev, token)?;
+                mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, mgr.as_raw() as usize)?;
+                Some(mgr)
+            }
+            None => None,
+        };
 
         let (mut ins, mut outs) = ([0u32], [0u32]);
         let (in_id, out_id) = if mft.GetStreamIDs(&mut ins, &mut outs).is_ok() { (ins[0], outs[0]) } else { (0, 0) };
@@ -160,6 +181,7 @@ impl HwEncoder {
             out_id,
             nv12: vec![0; width * height * 3 / 2],
             name: name.to_string(),
+            dxgi,
         })
     }
 
@@ -171,8 +193,54 @@ impl HwEncoder {
         }
     }
 
+    /// Muda o bitrate médio (CBR) sem reiniciar o encoder.
+    pub fn set_bitrate(&self, bps: u32) -> bool {
+        match &self.codec {
+            Some(c) => unsafe { c.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var_u4(bps)).is_ok() },
+            None => false,
+        }
+    }
+
+    pub fn uses_gpu(&self) -> bool {
+        self.dxgi.is_some()
+    }
+
     /// Codifica um quadro BGRA (já no tamanho do encoder). Devolve o que saiu (pode ser vazio).
     pub fn encode(&mut self, bgra: &[u8]) -> Result<Vec<u8>, String> {
+        let e = |x: windows::core::Error| x.message();
+        bgra_to_nv12(bgra, self.width, self.height, &mut self.nv12);
+        let sample = unsafe {
+            let buf = MFCreateMemoryBuffer(self.nv12.len() as u32).map_err(e)?;
+            let mut p = std::ptr::null_mut();
+            buf.Lock(&mut p, None, None).map_err(e)?;
+            std::ptr::copy_nonoverlapping(self.nv12.as_ptr(), p, self.nv12.len());
+            buf.Unlock().map_err(e)?;
+            buf.SetCurrentLength(self.nv12.len() as u32).map_err(e)?;
+            let sample = MFCreateSample().map_err(e)?;
+            sample.AddBuffer(&buf).map_err(e)?;
+            sample
+        };
+        self.submit(sample)
+    }
+
+    /// Codifica uma textura NV12 que já está na placa de vídeo (tamanho do encoder).
+    pub fn encode_texture(&mut self, tex: &ID3D11Texture2D) -> Result<Vec<u8>, String> {
+        let e = |x: windows::core::Error| x.message();
+        let sample = unsafe {
+            let buf = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, tex, 0, false).map_err(e)?;
+            if let Ok(b2) = buf.cast::<IMF2DBuffer>() {
+                if let Ok(n) = b2.GetContiguousLength() {
+                    buf.SetCurrentLength(n).map_err(e)?;
+                }
+            }
+            let sample = MFCreateSample().map_err(e)?;
+            sample.AddBuffer(&buf).map_err(e)?;
+            sample
+        };
+        self.submit(sample)
+    }
+
+    fn submit(&mut self, sample: IMFSample) -> Result<Vec<u8>, String> {
         let e = |x: windows::core::Error| x.message();
         let mut out = vec![];
         unsafe {
@@ -187,15 +255,6 @@ impl HwEncoder {
                 }
                 self.need_input -= 1;
             }
-            bgra_to_nv12(bgra, self.width, self.height, &mut self.nv12);
-            let buf = MFCreateMemoryBuffer(self.nv12.len() as u32).map_err(e)?;
-            let mut p = std::ptr::null_mut();
-            buf.Lock(&mut p, None, None).map_err(e)?;
-            std::ptr::copy_nonoverlapping(self.nv12.as_ptr(), p, self.nv12.len());
-            buf.Unlock().map_err(e)?;
-            buf.SetCurrentLength(self.nv12.len() as u32).map_err(e)?;
-            let sample = MFCreateSample().map_err(e)?;
-            sample.AddBuffer(&buf).map_err(e)?;
             sample.SetSampleTime(self.ts).map_err(e)?;
             sample.SetSampleDuration(self.frame_hns).map_err(e)?;
             self.ts += self.frame_hns;
@@ -335,7 +394,7 @@ mod tests {
         let list = hardware_encoders();
         println!("encoders: {:?}", list.iter().map(|x| &x.0).collect::<Vec<_>>());
         let (w, h) = (1920, 1080);
-        let mut enc = HwEncoder::new(w, h, 60, 8_000_000, 180).expect("encoder de hardware");
+        let mut enc = HwEncoder::new(w, h, 60, 8_000_000, 180, None).expect("encoder de hardware");
         println!("usando: {}", enc.name);
         let mut frame = vec![0u8; w * h * 4];
         let (mut bytes, mut nonempty, mut idr) = (0, 0, 0);

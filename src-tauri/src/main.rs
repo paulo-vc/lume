@@ -2,7 +2,9 @@
 
 mod audio;
 mod capture;
+mod gpu;
 mod mf;
+mod net;
 mod room;
 mod signal;
 mod stream;
@@ -287,6 +289,11 @@ fn stop_share(st: State<AppState>) {
 }
 
 #[tauri::command]
+fn set_bitrate(st: State<AppState>, kbps: u32) {
+    st.engine.set_bitrate(kbps);
+}
+
+#[tauri::command]
 fn set_quality(st: State<AppState>, quality: Quality) {
     st.engine.set_quality(quality);
 }
@@ -327,6 +334,28 @@ async fn join_room(st: State<'_, AppState>, code: String, name: String, av: Stri
 }
 
 #[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Abre no navegador o download da versão mais nova (endereço fixo; a página não escolhe o link).
+#[tauri::command]
+fn open_update() {
+    use windows::core::w;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    unsafe {
+        ShellExecuteW(None, w!("open"), w!("https://github.com/paulo-vc/lume/releases/latest/download/Lume.exe"), None, None, SW_SHOWNORMAL);
+    }
+}
+
+/// Se o roteador abre portas sozinho (UPnP) e se a internet usa CGNAT.
+#[tauri::command]
+async fn net_status() -> net::Status {
+    net::status().await
+}
+
+#[tauri::command]
 fn cancel_join(st: State<AppState>) {
     if let Some(n) = st.guest_cancel.lock().unwrap().take() {
         n.notify_waiters();
@@ -336,6 +365,7 @@ fn cancel_join(st: State<AppState>) {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            tauri::async_runtime::spawn(net::probe());
             app.manage(AppState {
                 host: Mutex::new(None),
                 guest_cancel: Mutex::new(None),
@@ -367,8 +397,12 @@ fn main() {
             list_processes,
             set_audio,
             set_quality,
+            set_bitrate,
             join_room,
-            cancel_join
+            cancel_join,
+            net_status,
+            app_version,
+            open_update
         ])
         .run(tauri::generate_context!())
         .expect("falha ao iniciar o Lume");

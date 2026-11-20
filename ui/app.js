@@ -159,16 +159,18 @@ function roster() {
     const list = [{ id: HOST, name: myName(), host: true, live: !!S.sharing }];
     for (const [id, p] of S.peers) list.push({ id, name: id, live: !!p.live, state: p.state, open: p.open, uid: p.uid });
     const r = curSaved();
-    if (r) for (const m of r.members) if (!list.some(x => x.uid === m.uid || x.name === m.name)) list.push({ id: 'off:' + m.uid, name: m.name, off: true, uid: m.uid });
+    if (r) for (const m of r.members) if (!list.some(x => x.uid === m.uid || x.name === m.name)) list.push({ id: offId(r, m), name: m.name, off: true, uid: m.uid });
     return list;
   }
   return S.role === 'guest' ? S.members : [];
 }
 function nameOf(id) { if (id === SELF || id === S.me) return 'Você'; const m = roster().find(m => m.id === id); return m ? m.name : id; }
+// Id de quem está fora da sala na lista que vai para os convidados: não expõe o uid (que libera a entrada direta).
+function offId(r, m) { return 'off:' + r.members.indexOf(m); }
 function avOf(id) {
   if (id === SELF || id === S.me) return myAv;
   if (S.avs.get(id)) return S.avs.get(id);
-  const r = curSaved(), m = r && String(id).startsWith('off:') && r.members.find(m => 'off:' + m.uid === id);
+  const r = curSaved(), m = r && String(id).startsWith('off:') && r.members.find(m => offId(r, m) === id);
   return m ? m.av : '';
 }
 
@@ -210,18 +212,20 @@ function renderPeers() {
 $('peers').onclick = e => {
   const b = e.target.closest('[data-kick]'); if (!b) return;
   const id = b.dataset.kick;
-  if (id.startsWith('off:')) { const r = curSaved(); if (r) { r.members = r.members.filter(m => 'off:' + m.uid !== id); saveRooms(); pushRoster(); } return; }
+  if (id.startsWith('off:')) { const r = curSaved(); if (r) { r.members = r.members.filter(m => offId(r, m) !== id); saveRooms(); pushRoster(); } return; }
   // Remover tira da sala e da lista de convidados (precisa pedir de novo para entrar).
   const p = S.peers.get(id), r = curSaved();
   if (p && r && p.uid) { r.members = r.members.filter(m => m.uid !== p.uid); saveRooms(); }
-  dropPeer(id, 'foi removido da sala');
+  sendPeer(id, { t: 'kick' });
+  setTimeout(() => dropPeer(id, 'foi removido da sala'), 300); // dá tempo do aviso chegar
 };
 function dropPeer(id, why) {
-  if (!S.peers.delete(id)) return;
+  if (!S.peers.delete(id)) return Promise.resolve();
   S.avs.delete(id);
-  invoke('remove_peer', { name: id }).catch(() => {});
+  const done = invoke('remove_peer', { name: id }).catch(() => {});
   if (why) toast(`${id} ${why}`);
   pushRoster();
+  return done;
 }
 
 // ---------- abas Participantes / Pedidos ----------
@@ -254,6 +258,7 @@ function openModal(kind) {
     sheet.innerHTML = `<h2>Código da sala</h2><p>Mande este código para quem você quer convidar. A pessoa digita no Lume dela e você clica em Aceitar só na primeira vez; depois ela entra direto sempre que a sala estiver aberta.</p>
       <div class="bigcode" id="inv">${esc(S.room.code)}</div>
       <div class="mute" id="relay" style="text-align:center;font-size:12px;margin-top:8px"></div>
+      <div class="mute" id="netst" style="text-align:center;font-size:12px;margin-top:4px;line-height:1.45"></div>
       <div class="act"><button class="btn ghost" id="rot" title="O código antigo para de funcionar para todos">Trocar código</button><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="cp">Copiar código</button></div>`;
     $('x').onclick = closeModal;
     $('cp').onclick = () => copy(S.room.code);
@@ -266,6 +271,7 @@ function openModal(kind) {
       if (!n) setTimeout(check, 1000);
     };
     check();
+    showNet();
   }
   if (kind === 'join') {
     if (S.role) return toast('Saia da sala atual primeiro');
@@ -280,6 +286,18 @@ function openModal(kind) {
     setTimeout(() => $('jCode') && $('jCode').focus(), 50);
   }
   modal.classList.add('show');
+}
+
+// Como está a rede deste PC para receber conexões (porta aberta no roteador ou CGNAT).
+async function showNet() {
+  const el = $('netst'); if (!el) return;
+  const n = await invoke('net_status').catch(() => null);
+  if (!n || !$('netst')) return;
+  if (n.checking) { el.textContent = 'Verificando o roteador…'; return setTimeout(showNet, 1000); }
+  el.style.color = n.upnp ? 'var(--good)' : '';
+  el.textContent = n.upnp ? '● Roteador abre a porta sozinho: convidados em qualquer rede conseguem conectar'
+    : n.cgnat ? 'Sua internet usa CGNAT. Se o convidado também estiver numa rede restritiva, a conexão direta pode falhar; nesse caso, peça para ele criar a sala.'
+    : 'O roteador não abriu a porta (UPnP desligado). Se algum convidado não conectar, ative o UPnP no roteador ou peça para ele criar a sala.';
 }
 
 // ---------- pedidos de entrada (anfitrião) ----------
@@ -323,7 +341,12 @@ listen('join-request', ({ payload: r }) => {
   r.av = okAv(r.av); S.reqs.set(r.id, r);
   // Já foi aceito antes nesta sala: entra direto.
   const known = curSaved() && /^[0-9a-f]{32}$/.test(r.uid || '') && curSaved().members.some(m => m.uid === r.uid);
-  if (known) { toast(`${r.name} voltou para a sala`); return answerReq(r.id, true); }
+  if (known) {
+    // Caiu e voltou: a conexão velha dele pode ainda constar aqui; tira antes, para não virar "Nome (2)".
+    const old = [...S.peers].filter(([, p]) => p.uid === r.uid).map(([pid]) => dropPeer(pid));
+    toast(`${r.name} voltou para a sala`);
+    return Promise.all(old).then(() => answerReq(r.id, true));
+  }
   renderReqs();
   const el = document.createElement('div');
   el.className = 'reqcard'; el.dataset.id = r.id;
@@ -369,6 +392,10 @@ listen('ctl-msg', ({ payload: [id, text] }) => {
   if (m.t === 'live') { p.live = !!m.on; pushRoster(); }
   if (m.t === 'bye') dropPeer(id, 'saiu');
   if (m.t === 'av') { const av = okAv(m.av); S.avs.set(id, av); rememberMember(p.uid, id, av); broadcast({ t: 'av', id, av }, id); renderPeers(); labelTiles(); }
+  if (m.t === 'fb') {
+    const r = { t: 'fb', from: id, loss: +m.loss || 0, fz: +m.fz || 0, jb: +m.jb || 0 };
+    if (m.to === HOST) onFb(r); else if (S.peers.has(m.to)) sendPeer(m.to, r);
+  }
   if (m.t === 'sig') {
     m.from = id; // quem mandou é quem o canal diz que é, não o que veio escrito
     if (m.to === HOST) onSig(m); else if (S.peers.has(m.to)) sendPeer(m.to, m);
@@ -389,6 +416,8 @@ function onHostMsg(text) {
   if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off }));
   if (m.t === 'av') { S.avs.set(String(m.id), okAv(m.av)); labelTiles(); }
   if (m.t === 'sig') onSig(m);
+  if (m.t === 'fb') onFb({ from: String(m.from), loss: +m.loss || 0, fz: +m.fz || 0, jb: +m.jb || 0 });
+  if (m.t === 'kick' || m.t === 'closed') S.bye = m.t;
   if (S.me) refresh();
 }
 
@@ -414,7 +443,9 @@ function makeTile(id) {
   const el = document.createElement('div');
   el.className = 'tile'; el.dataset.id = id;
   el.innerHTML = id === SELF
-    ? `<div class="self"><div><b>Você está transmitindo</b><br><span class="what"></span></div></div><div class="tl"><span class="chip"><span class="dot live"></span><span class="res">—</span></span></div>`
+    ? `<video autoplay playsinline muted></video><div class="self"><div><b>Você está transmitindo</b><br><span class="what"></span></div></div>
+       <div class="tl"><span class="chip"><span class="dot live"></span><span class="res">—</span></span></div>
+       <div class="tb"><button data-a="preview" title="Mostrar/ocultar a prévia da sua tela">👁</button><button data-a="focus" title="Destacar">⤢</button><button data-a="fs" title="Tela cheia">⛶</button></div>`
     : `<video autoplay playsinline></video>
        <div class="tl"><div class="av"></div><span class="chip"><span class="who"></span><span class="res mute"></span></span></div>
        <div class="tb"><button data-a="mute" title="Silenciar esta tela">🔊</button><input type="range" min="0" max="100" value="100" title="Volume desta tela">
@@ -423,6 +454,7 @@ function makeTile(id) {
   el.onclick = e => {
     const b = e.target.closest('[data-a]');
     if (e.target.closest('input')) return;
+    if (b && b.dataset.a === 'preview') { setPreview(!S.preview); return; }
     if (b && b.dataset.a === 'mute') { v.muted = !v.muted; b.classList.toggle('off', v.muted); b.textContent = v.muted ? '🔇' : '🔊'; return; }
     if (b && b.dataset.a === 'fs') return void (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen());
     // Clique na tela: destaca (as outras vão para a faixa de baixo). Clique de novo: volta para a grade.
@@ -464,6 +496,7 @@ function layoutTiles() {
 function closeStream(id) {
   const st = S.streams.get(id); if (!st) return;
   S.streams.delete(id); clearTimeout(st.timer);
+  if (id === SELF) stopPreview(st);
   if (st.pc) st.pc.close();
   const v = st.el.querySelector('video'); if (v) v.srcObject = null;
 }
@@ -502,9 +535,45 @@ function syncStreams() {
     if (Date.now() - (S.failed.get(id) || 0) < 10000) continue; // falhou há pouco: espera antes de tentar de novo
     openStream(id);
   }
-  if (S.sharing && !S.streams.has(SELF)) S.streams.set(SELF, { el: makeTile(SELF) });
+  if (S.sharing && !S.streams.has(SELF)) { const st = { el: makeTile(SELF) }; S.streams.set(SELF, st); if (S.preview) startPreview(st); paintPreview(st); }
   if (!S.sharing && S.streams.has(SELF)) closeStream(SELF);
   layoutTiles();
+}
+
+// ---------- prévia da minha tela ----------
+// A prévia é uma conexão local com o próprio Lume: mostra exatamente o que os outros recebem
+// (mesma imagem codificada), decodificada pela placa de vídeo. Desligada, fica só o quadro preto.
+try { S.preview = localStorage.getItem('sl.preview') !== '0'; } catch { S.preview = true; }
+const PREVIEW = '@preview';
+async function startPreview(st) {
+  if (st.pc) return;
+  const pc = st.pc = recvPc();
+  st.ms = new MediaStream();
+  pc.ontrack = e => { if (e.track.kind === 'video') { st.ms.addTrack(e.track); tuneReceiver(e.receiver); attach(st); } };
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitIce(pc, 1500);
+    const sdp = await invoke('accept_viewer', { name: PREVIEW, offerSdp: pc.localDescription.sdp });
+    if (st.pc === pc) await pc.setRemoteDescription({ type: 'answer', sdp });
+  } catch { if (st.pc === pc) { pc.close(); st.pc = null; } }
+}
+function stopPreview(st) {
+  if (!st.pc) return;
+  st.pc.close(); st.pc = null;
+  const v = st.el.querySelector('video'); if (v) v.srcObject = null;
+  invoke('remove_peer', { name: PREVIEW }).catch(() => {});
+}
+function paintPreview(st) {
+  st.el.querySelector('.self').hidden = S.preview;
+  const b = st.el.querySelector('[data-a=preview]');
+  b.classList.toggle('off', !S.preview); b.title = S.preview ? 'Ocultar a prévia (economiza um pouco de placa de vídeo)' : 'Mostrar a prévia da sua tela';
+}
+function setPreview(on) {
+  S.preview = on;
+  try { localStorage.setItem('sl.preview', on ? '1' : '0'); } catch {}
+  const st = S.streams.get(SELF); if (!st) return;
+  on ? startPreview(st) : stopPreview(st);
+  paintPreview(st);
 }
 
 // ---------- transmitir a minha tela ----------
@@ -575,7 +644,7 @@ function stopShare() {
     invoke('stop_share').catch(() => {});
     if (S.role === 'guest') invoke('drop_viewers').catch(() => {});
   }
-  const was = S.sharing; S.sharing = null; S.enc = null;
+  const was = S.sharing; S.sharing = null; S.enc = null; S.fb.clear(); S.rate = 0;
   $('share').textContent = '▶ Compartilhar tela'; $('share').className = 'btn pri inRoom';
   if (was) announceLive();
 }
@@ -598,12 +667,12 @@ async function guestStart() {
   dc.onopen = () => dc.send(JSON.stringify({ t: 'hi' }));
   dc.onmessage = e => { if (S.guestPc === pc && typeof e.data === 'string') onHostMsg(e.data); };
   // O canal fecha na hora quando o anfitrião remove a pessoa ou fecha a sala.
-  dc.onclose = () => { if (S.role === 'guest' && S.guestPc === pc) { toast('O anfitrião encerrou a sua conexão', 5000); leave(); } };
+  dc.onclose = () => { if (S.role === 'guest' && S.guestPc === pc) lost(); };
   pc.ontrack = e => { ms.addTrack(e.track); tuneReceiver(e.receiver); const st = S.streams.get(HOST); if (st) attach(st); };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected') { toast('Conectado'); closeModal(); }
     if (pc.connectionState === 'failed') toast('Não foi possível conectar direto (rede com NAT restritivo)', 5000);
-    if (['failed', 'closed'].includes(pc.connectionState) && S.role === 'guest' && S.guestPc === pc) leave();
+    if (['failed', 'closed'].includes(pc.connectionState) && S.role === 'guest' && S.guestPc === pc) lost();
   };
   await pc.setLocalDescription(await pc.createOffer());
   await waitIce(pc);
@@ -622,6 +691,18 @@ async function guestStart() {
   }
 }
 
+// Saí da sala sem querer: se foi expulso ou a sala fechou, avisa; se a conexão caiu, volta sozinho
+// (quem já foi aceito entra direto, então o anfitrião nem precisa clicar).
+function lost() {
+  const bye = S.bye, code = S.joinCode;
+  leave();
+  if (bye === 'kick') return toast('O anfitrião removeu você da sala', 5000);
+  if (bye === 'closed') return toast('O anfitrião fechou a sala', 5000);
+  if (!code) return toast('A conexão com a sala caiu', 5000);
+  toast('A conexão caiu. Reconectando…', 4000);
+  setTimeout(() => { if (S.role) return; openModal('join'); $('jCode').value = code; guestStart(); }, 1500);
+}
+
 // ---------- painel de qualidade (da minha transmissão) ----------
 document.querySelectorAll('.seg').forEach(seg => seg.onclick = e => {
   const b = e.target.closest('button'); if (!b) return;
@@ -630,21 +711,69 @@ document.querySelectorAll('.seg').forEach(seg => seg.onclick = e => {
   S.q[k] = k === 'pri' ? b.dataset.v : +b.dataset.v;
   qualityChanged();
 });
-$('br').oninput = () => { S.q.br = +$('br').value; $('brv').textContent = S.q.br + ' Mbps'; };
+$('br').oninput = () => { S.q.br = +$('br').value; paintRate(); };
 $('br').onchange = qualityChanged;
-function qualityChanged() { invoke('set_quality', { quality: S.q }).catch(err => toast(String(err))); }
+function qualityChanged() { invoke('set_quality', { quality: S.q }).catch(err => toast(String(err))); S.rate = 0; adapt(); }
+
+// ---------- qualidade automática ----------
+// Quem assiste manda a cada 2 s como a imagem está chegando (perda de pacotes, travadas, atraso
+// do buffer). Quem transmite ajusta o bitrate pelo pior relato: cai rápido quando alguém engasga
+// e sobe devagar quando todos estão bem, sem passar do máximo escolhido. O encoder muda na hora.
+S.fb = new Map(); S.rate = 0; S.hold = 0; S.sent = -1;
+try { S.auto = localStorage.getItem('sl.auto') !== '0'; } catch { S.auto = true; }
+function feedback(id, a, b) {
+  if (!a || !b || id === SELF || b.recv == null || a.recv == null) return;
+  const recv = b.recv - a.recv, lost = Math.max(0, b.lost - a.lost);
+  if (recv + lost < 20) return; // tela parada: pouco para medir
+  const r = { t: 'fb', to: id, loss: +(lost / (recv + lost)).toFixed(3), fz: Math.max(0, b.fz - a.fz), jb: b.jbe > a.jbe ? Math.round((b.jbd - a.jbd) / (b.jbe - a.jbe) * 1000) : 0 };
+  if (S.role === 'host') sendPeer(id, { ...r, from: HOST });
+  else sendHost(r);
+}
+function onFb(r) { if (S.sharing) S.fb.set(r.from, { ...r, at: Date.now() }); }
+function adapt() {
+  const max = S.q.br * 1000;
+  let target = 0;
+  if (S.auto && S.sharing) {
+    const now = Date.now();
+    const fresh = [...S.fb.values()].filter(f => now - f.at < 7000);
+    let cur = S.rate || max;
+    if (fresh.some(f => f.loss > 0.03 || f.fz > 0 || f.jb > 250)) { cur = Math.max(300, cur * 0.7); S.hold = now; }
+    else if (fresh.every(f => f.loss < 0.01 && f.jb < 150) && now - S.hold > 6000) cur = Math.min(max, cur * 1.15);
+    S.rate = Math.round(Math.min(cur, max));
+    target = S.rate >= max ? 0 : S.rate;
+  } else S.rate = 0;
+  if (target !== S.sent) { S.sent = target; invoke('set_bitrate', { kbps: target }).catch(() => {}); }
+  paintRate();
+}
+function paintRate() {
+  $('autoSeg').querySelectorAll('button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === S.auto));
+  $('brl').textContent = S.auto ? 'Bitrate máx.' : 'Bitrate';
+  const now = S.auto && S.sharing && S.rate && S.rate < S.q.br * 1000;
+  $('brv').textContent = now ? `${(S.rate / 1000).toFixed(1)} de ${S.q.br} Mbps` : `${S.q.br} Mbps`;
+  $('brv').title = now ? 'Reduzido automaticamente porque a conexão de alguém está engasgando' : '';
+}
+$('autoSeg').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.auto = b.dataset.v === '1';
+  try { localStorage.setItem('sl.auto', S.auto ? '1' : '0'); } catch {}
+  S.rate = 0; adapt();
+};
+setInterval(adapt, 2000);
+paintRate();
 
 // ---------- sair ----------
 function leave() {
   const was = S.role;
   if (was === 'guest') sendHost({ t: 'bye' });
+  if (was === 'host') broadcast({ t: 'closed' });
   stopShare();
   for (const id of [...S.streams.keys()]) closeStream(id);
-  if (was) invoke('close_room').catch(() => {});
+  // O anfitrião espera o aviso "sala fechada" sair antes de derrubar as conexões.
+  if (was) setTimeout(() => { if (!S.role) invoke('close_room').catch(() => {}); }, was === 'host' ? 400 : 0);
   $('reqs').innerHTML = '';
   S.peers.clear(); S.members = []; S.avs.clear(); S.reqs.clear(); S.failed.clear();
   if (S.guestPc) S.guestPc.close();
-  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.me = null; S.focus = null;
+  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.bye = null; S.me = null; S.focus = null;
   showTab(false); layoutTiles(); render();
 }
 $('leave').onclick = leave;
@@ -654,7 +783,7 @@ async function readStats(pc, prev) {
   const r = await pc.getStats(); const out = { t: performance.now() };
   r.forEach(s => {
     if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') out.rtt = s.currentRoundTripTime;
-    if (s.type === 'inbound-rtp' && s.kind === 'video') { out.bytes = s.bytesReceived; out.fps = s.framesPerSecond; out.w = s.frameWidth; out.h = s.frameHeight; out.lost = s.packetsLost; out.recv = s.packetsReceived; }
+    if (s.type === 'inbound-rtp' && s.kind === 'video') { out.bytes = s.bytesReceived; out.fps = s.framesPerSecond; out.w = s.frameWidth; out.h = s.frameHeight; out.lost = s.packetsLost; out.recv = s.packetsReceived; out.fz = s.freezeCount || 0; out.jbd = s.jitterBufferDelay || 0; out.jbe = s.jitterBufferEmittedCount || 0; }
   });
   if (prev && out.bytes != null && prev.bytes != null) out.kbps = (out.bytes - prev.bytes) * 8 / (out.t - prev.t);
   return out;
@@ -667,7 +796,9 @@ setInterval(async () => {
     const res = st.el.querySelector('.res');
     if (id === SELF) { res.textContent = S.enc ? `${S.enc.width}×${S.enc.height} · ${Math.round(S.enc.fps)} fps · ${S.enc.encoder}` : 'iniciando…'; continue; }
     const pc = st.viaHost ? S.guestPc : st.pc; if (!pc) continue;
-    st.stats = await readStats(pc, st.stats).catch(() => st.stats);
+    const prev = st.stats;
+    st.stats = await readStats(pc, prev).catch(() => prev);
+    feedback(id, prev, st.stats);
     const s = st.stats;
     res.textContent = s && s.w ? ` · ${s.w}×${s.h} · ${Math.round(s.fps || 0)} fps` : ' · conectando…';
   }
@@ -686,6 +817,29 @@ setInterval(async () => {
   const loss = s && s.recv ? 100 * s.lost / (s.lost + s.recv) : null;
   $('sLoss').textContent = loss != null ? loss.toFixed(1) + '%' : '—';
 }, 1000);
+
+// ---------- aviso de versão nova ----------
+// Só consulta a página pública de lançamentos do projeto; nada sobre você é enviado.
+function newer(a, b) {
+  const p = v => String(v).replace(/^v/, '').split(/[.-]/).map(x => parseInt(x, 10) || 0);
+  const [x, y] = [p(a), p(b)];
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+}
+async function checkUpdate() {
+  try {
+    const cur = await invoke('app_version');
+    const r = await fetch('https://api.github.com/repos/paulo-vc/lume/releases/latest', { headers: { Accept: 'application/vnd.github+json' }, credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!r.ok) return;
+    const tag = String((await r.json()).tag_name || '');
+    if (!/^v?\d+\.\d+\.\d+$/.test(tag) || !newer(tag, cur)) return;
+    $('updVer').textContent = `${tag.replace(/^v/, '')} (você tem ${cur})`;
+    $('update').hidden = false;
+  } catch {}
+}
+$('updGo').onclick = () => { invoke('open_update').catch(() => {}); toast('Baixando no navegador. Feche o Lume e abra o arquivo novo.', 5000); };
+setTimeout(checkUpdate, 3000);
+setInterval(checkUpdate, 6 * 3600 * 1000);
 
 window.addEventListener('resize', layoutTiles);
 window.addEventListener('beforeunload', leave);

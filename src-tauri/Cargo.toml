@@ -1,6 +1,6 @@
 [package]
 name = "lume"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Compartilhamento de tela P2P portátil"
 
@@ -25,9 +25,11 @@ rtc = "0.21.1"
 bytes = "1.12.1"
 async-trait = "0.1.92"
 unsafe-libopus = "0.2.0"
-windows = { version = "0.62.2", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
+windows = { version = "0.62.2", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 rumqttc = { version = "0.25.1", default-features = false }
 chacha20poly1305 = "0.11.0"
+igd-next = { version = "0.17", features = ["aio_tokio"] }
+local-ip-address = "0.6"
 
 [profile.release]
 opt-level = "s"
