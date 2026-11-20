@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lume: compartilhe a tela com seus amigos</title>
+<meta name="description" content="Compartilhe a tela com seus amigos, direto de PC para PC. Sem conta, sem servidor e de graça. Um único arquivo para Windows, e versão web para assistir pelo celular.">
+<meta property="og:title" content="Lume: compartilhe a tela com seus amigos">
+<meta property="og:description" content="Direto de PC para PC, sem conta e de graça. Todo mundo da sala transmite.">
+<meta property="og:image" content="img/sala.jpg">
+<link rel="icon" href="icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@900&family=Red+Hat+Text:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<header class="hero" id="topo">
+  <nav class="nav" aria-label="Principal">
+    <a class="mono" href="#topo" aria-label="Lume, início"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><g stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 4v16M4 12h16M6.3 6.3l11.4 11.4M17.7 6.3 6.3 17.7"/></g></svg></a>
+    <div class="links">
+      <a href="#como">Como funciona</a>
+      <a href="#perguntas">Perguntas</a>
+      <a href="app/">Versão web</a>
+      <a class="btn" href="https://github.com/paulo-vc/lume/releases/latest/download/Lume.exe">Baixar</a>
+    </div>
+  </nav>
+  <div class="pitch">
+    <p>Compartilhe a tela com seus amigos, direto de PC para PC. Sem conta, sem servidor e de graça.</p>
+    <div class="acts">
+      <a class="btn big" href="https://github.com/paulo-vc/lume/releases/latest/download/Lume.exe">Baixar para Windows</a>
+      <a class="plain" href="app/">Assistir pelo celular</a>
+    </div>
+    <p class="fine">Versão 1.1 · Windows 10 e 11 · um arquivo de 6,7 MB, não instala nada</p>
+  </div>
+  <h1 class="name" aria-label="Lume"><span class="line"><span>LU</span><span class="dim">ME</span></span></h1>
+</header>
+
+<main>
+
+<section class="show" aria-labelledby="show-h">
+  <figure class="plate" data-r>
+    <img id="plateImg" src="img/quadrado.jpg" width="1200" height="1200" alt="O Lume com a tela do Dig em destaque e as telas do Paulo e da Ana na faixa de baixo.">
+  </figure>
+  <div class="side" data-r>
+    <div class="tabs" role="tablist" aria-label="Como as telas aparecem">
+      <button role="tab" aria-selected="true" data-img="img/quadrado.jpg" data-alt="O Lume com a tela do Dig em destaque e as telas do Paulo e da Ana na faixa de baixo." data-t="Clique numa tela e ela vira a principal. As outras descem para a faixa de baixo; duplo clique abre em tela cheia.">Destaque</button>
+      <button role="tab" aria-selected="false" data-img="img/sala-q.jpg" data-alt="Duas telas lado a lado na grade, com a lista de pessoas ao vivo." data-t="Cada pessoa que transmite ganha um lugar na grade. O Lume escolhe o tamanho que deixa todas as telas maiores.">Grade</button>
+      <button role="tab" aria-selected="false" data-img="img/celular-q.jpg" data-alt="A versão web no celular mostrando as três telas da sala." data-t="No celular, a versão web abre pelo navegador e mostra as mesmas telas, uma embaixo da outra.">Celular</button>
+    </div>
+    <div class="say">
+      <h2 id="show-h">Todo mundo transmite</h2>
+      <p id="plateText">Clique numa tela e ela vira a principal. As outras descem para a faixa de baixo; duplo clique abre em tela cheia.</p>
+      <p>Cada tela tem seu volume e seu mudo, e você vê a sua própria transmissão do jeito que os outros recebem.</p>
+    </div>
+    <div class="cells">
+      <a class="cell ink" href="https://github.com/paulo-vc/lume/releases/latest/download/Lume.exe">Baixar para Windows</a>
+      <a class="cell tone" href="app/">Abrir a versão web</a>
+    </div>
+  </div>
+</section>
+
+<section class="how" id="como" aria-labelledby="como-h">
+  <div class="col">
+    <h2 id="como-h">Um código e pronto</h2>
+    <div class="stage" data-r>
+      <p><b>Para começar,</b> você cria a sala e o Lume mostra um código de 12 letras e números. É a única coisa que você manda para os amigos, pelo WhatsApp, pelo Discord ou de boca.</p>
+      <img src="img/convite.jpg" width="960" height="720" loading="lazy" alt="A janela Código da sala, com o código PP8Z-VP1X-PC4Y e o aviso de que o roteador abriu a porta.">
+    </div>
+    <div class="stage" data-r>
+      <p><b>Do outro lado,</b> seu amigo digita o código e você clica em Aceitar. Só na primeira vez: da próxima, ele entra direto sempre que a sala estiver aberta.</p>
+      <img src="img/pedido.jpg" width="900" height="780" loading="lazy" alt="Aviso de que a Ana quer entrar na sala, com os botões Recusar e Aceitar, e o pedido também na aba Pedidos.">
+    </div>
+    <div class="stage" data-r>
+      <p><b>Daí em diante,</b> a sala fica salva do lado esquerdo, com quem já passou por ela. Se quem criou a sala sair, quem está há mais tempo assume, e o resto reconecta sozinho.</p>
+      <img src="img/salas.jpg" width="560" height="600" loading="lazy" alt="A barra lateral do Lume com as salas Jogatina de sábado, Filme de sexta e Trabalho da facul.">
+    </div>
+  </div>
+</section>
+
+<section class="feat" aria-labelledby="feat-h">
+  <h2 id="feat-h">O que vem junto</h2>
+  <div class="cols">
+    <div class="group" data-r>
+      <h3>Tela</h3>
+      <ul>
+        <li tabindex="0" data-d="O monitor inteiro ou só uma janela, de qualquer programa.">Telas e janelas</li>
+        <li tabindex="0" data-d="A captura é a do próprio Windows: não aparece a barra de compartilhamento, e no Windows 11 nem a borda amarela.">Sem barra de compartilhando</li>
+        <li tabindex="0" data-d="Uma prévia mostra exatamente o que os outros recebem. O botão do olho desliga.">Prévia da sua tela</li>
+        <li tabindex="0" data-d="Clique numa tela para destacar; as outras ficam numa faixa embaixo.">Grade com destaque</li>
+        <li tabindex="0" data-d="Duplo clique em qualquer tela.">Tela cheia</li>
+        <li tabindex="0" data-d="Cada tela tem seu próprio volume e mudo.">Volume por tela</li>
+        <li tabindex="0" data-d="Até 8 pessoas na mesma sala.">Até 8 pessoas</li>
+      </ul>
+      <p class="sum">Qualquer pessoa transmite, e cada um escolhe para qual tela olhar.</p>
+    </div>
+    <div class="group" data-r>
+      <h3>Som</h3>
+      <ul>
+        <li tabindex="0" data-d="Transmitindo um jogo, vai só o som do jogo.">Só o som da janela</li>
+        <li tabindex="0" data-d="Tudo que toca no PC vai junto, menos o programa da call. Ninguém ouve a própria voz de volta.">PC inteiro, menos a call</li>
+        <li tabindex="0" data-d="O Lume já deixa marcado o Discord, o Teams, o Zoom ou o WhatsApp que estiver aberto.">Discord, Teams e Zoom de fora</li>
+        <li tabindex="0" data-d="Áudio Opus em pacotes de 10 ms, com correção de perda.">Som com pouco atraso</li>
+      </ul>
+      <p class="sum">O som certo vai junto, e a voz da call não volta como eco.</p>
+    </div>
+    <div class="group" data-r>
+      <h3>Conexão</h3>
+      <ul>
+        <li tabindex="0" data-d="Vídeo e som vão direto entre os computadores, cifrados de ponta a ponta.">Direto de PC para PC</li>
+        <li tabindex="0" data-d="O Lume pede ao roteador para abrir uma porta só para cada conexão, e fecha quando a pessoa sai.">Abre a porta do roteador</li>
+        <li tabindex="0" data-d="Conecta também por IPv6, que passa por muitas redes onde o IPv4 trava.">IPv6</li>
+        <li tabindex="0" data-d="Se a internet de quem assiste engasga, a qualidade baixa sozinha e volta a subir quando melhora.">Qualidade automática</li>
+        <li tabindex="0" data-d="Se a conexão cair, quem estava na sala volta sem clicar em nada.">Reconecta sozinho</li>
+        <li tabindex="0" data-d="Quem criou a sala saiu? Quem está há mais tempo assume, com o mesmo código.">A sala continua sem o anfitrião</li>
+      </ul>
+      <p class="sum">Feito para funcionar entre casas diferentes, não só na mesma rede.</p>
+    </div>
+    <p class="desc" aria-live="polite" id="featDesc">Passe o mouse num item para ver o que ele faz.</p>
+  </div>
+</section>
+
+<section class="stats" aria-labelledby="stats-h">
+  <div class="rows" data-r>
+    <h2 id="stats-h">Medido num PC de verdade</h2>
+    <dl>
+      <div><dt>0,07</dt><dd>núcleo de CPU para transmitir em 1080p a 60 quadros por segundo. A imagem vai da captura ao codificador sem sair da placa de vídeo; o jeito antigo gastava 0,80.</dd></div>
+      <div><dt>60</dt><dd>quadros por segundo também em 1440p, onde o caminho pela CPU não passava de 48.</dd></div>
+      <div><dt>40 ms</dt><dd>de espera no lado de quem assiste, antes de mostrar a imagem.</dd></div>
+      <div><dt>6,7 MB</dt><dd>é o programa inteiro: um arquivo, sem instalador e sem conta.</dd></div>
+    </dl>
+    <p class="note">Medições com uma placa AMD Radeon RX 9060 XT, transmitindo uma animação em tela cheia por 10 segundos.</p>
+  </div>
+  <figure class="phone" data-r>
+    <img src="img/celular-foco.jpg" width="780" height="1688" loading="lazy" alt="A versão web no celular, com a tela do Dig em destaque.">
+  </figure>
+</section>
+
+<section class="faq" id="perguntas" aria-labelledby="faq-h">
+  <div class="row head"><h2 id="faq-h">Perguntas</h2></div>
+
+  <div class="row" data-r>
+    <h3>Dá para adivinhar o código?</h3>
+    <div class="ans">
+      <p>Não, nem trocando uma letra para cair em outra sala. Cada sala tem um entre mais de um quintilhão de códigos, sorteados pelo sistema. Do código saem o endereço da sala e a chave que cifra o pedido de entrada; uma letra trocada leva a um endereço e uma chave completamente diferentes. E, mesmo com o código certo, quem criou a sala precisa aceitar a pessoa na primeira vez.</p>
+      <div class="lab" id="lab">
+        <label for="code">Experimente: troque uma letra</label>
+        <div class="field"><input id="code" value="K7QM-2XPD-9RTA" maxlength="16" spellcheck="false" autocomplete="off" autocapitalize="characters"><button id="dice" type="button">Sortear outro</button></div>
+        <dl class="out">
+          <div><dt>Endereço da sala</dt><dd id="outTopic">lume2/915548bfc5910d8143ce561e</dd></div>
+          <div><dt>Chave</dt><dd id="outKey">74e764e54a677f37f31d756dfbadf0cf3ec09d69e45bf0740febef9c4ca1c5f2</dd></div>
+        </dl>
+        <p class="hint" id="labHint">É a mesma conta que o Lume faz, aqui no seu navegador. Ela leva uma fração de segundo de propósito, para que testar códigos às cegas seja inviável.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="row" data-r>
+    <h3>Alguém consegue ver o que eu transmito?</h3>
+    <div class="ans"><p>Só quem está na sala. Vídeo, som e mensagens vão direto entre os computadores, cifrados. Servidores públicos servem só para os dois PCs se encontrarem, e o que passa por eles também está cifrado pelo código. O Lume não tem conta, não coleta nada e o código é aberto.</p></div>
+  </div>
+
+  <div class="row" data-r>
+    <h3>Funciona no celular?</h3>
+    <div class="ans"><p>Para assistir, sim: a versão web abre no navegador do celular ou de qualquer computador, sem instalar nada. Criar salas e transmitir a tela é pelo app no Windows.</p></div>
+  </div>
+
+  <div class="row" data-r>
+    <h3>E se a conexão não passar?</h3>
+    <div class="ans"><p>O Lume abre a porta do roteador sozinho e tenta também por IPv6, e na janela do convite diz se a sua rede está pronta. Se a internet dos dois lados usar CGNAT e nenhum tiver IPv6, a conexão direta não é possível; nesse caso, peça para o outro criar a sala.</p></div>
+  </div>
+
+  <div class="row" data-r>
+    <h3>Quanto custa?</h3>
+    <div class="ans"><p>Nada. O Lume é gratuito e de código aberto, e o código está no <a href="https://github.com/paulo-vc/lume">GitHub</a>.</p></div>
+  </div>
+</section>
+
+<a class="cta" href="https://github.com/paulo-vc/lume/releases/latest/download/Lume.exe">
+  <span class="cta-say">Baixa o Lume.exe e abre. Não instala nada, não pede conta.</span>
+  <svg class="cta-arrow" viewBox="0 0 48 48" aria-hidden="true"><path d="M14 34 34 14M18 14h16v16" fill="none" stroke="currentColor" stroke-width="4"/></svg>
+  <span class="cta-word">Baixar</span>
+</a>
+
+</main>
+
+<footer class="foot">
+  <div class="fcols">
+    <div><b>Lume 1.1</b><span>Windows 10 e 11</span><span>Versão web para assistir</span></div>
+    <div><b>Links</b><a href="https://github.com/paulo-vc/lume/releases/latest/download/Lume.exe">Baixar</a><a href="app/">Versão web</a><a href="https://github.com/paulo-vc/lume">Código no GitHub</a><a href="https://github.com/paulo-vc/lume/releases">Novidades</a></div>
+    <div class="credits"><b>Fotos nas capturas</b><span>As telas compartilhadas mostram fotos de acervos abertos:</span><a href="https://commons.wikimedia.org/wiki/File:Aurora_australis_dancing_over_an_LED_illuminated_igloo.jpg">Aurora austral, Ross Burgener (domínio público)</a><a href="https://commons.wikimedia.org/wiki/File:Coral_Outcrop_Flynn_Reef.jpg">Recife Flynn, Toby Hudson (CC BY-SA 3.0)</a><a href="https://www.rawpixel.com/image/5904011/photo-image-public-domain-tree-green">Montanha e lago, rawpixel (CC0)</a></div>
+    <div><b>Privacidade</b><span>Sem conta, sem anúncios, nada coletado.</span><span>Esta página não usa cookies.</span></div>
+  </div>
+  <div class="fword" aria-hidden="true">LUME</div>
+  <p class="legal">Código aberto. Nomes nas capturas são de exemplo.</p>
+</footer>
+
+<script src="app/lume-web.js"></script>
+<script src="site.js"></script>
+</body>
+</html>

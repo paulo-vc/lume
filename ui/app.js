@@ -4,7 +4,9 @@
 // e a resposta dessa conexão viajam pelo canal de controle, com o anfitrião repassando.
 'use strict';
 
-const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : async () => { throw 'Rode dentro do app' };
+// No app, os comandos vão para o Rust; na versão web (web/lume-web.js), para o navegador.
+const WEB = !window.__TAURI__ && !!window.LumeWeb;
+const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : WEB ? window.LumeWeb.invoke : async () => { throw 'Rode dentro do app' };
 const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
 const $ = id => document.getElementById(id);
 const ICE = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
@@ -336,12 +338,16 @@ function onReqClick(e) {
 }
 $('reqs').onclick = onReqClick; $('reqList').onclick = onReqClick;
 
-listen('join-request', ({ payload: r }) => {
+listen('join-request', async ({ payload: r }) => {
   if (S.role !== 'host' || S.reqs.has(r.id)) return;
-  r.av = okAv(r.av); S.reqs.set(r.id, r);
-  // Já foi aceito antes nesta sala: entra direto.
-  const known = curSaved() && /^[0-9a-f]{32}$/.test(r.uid || '') && curSaved().members.some(m => m.uid === r.uid);
-  if (known) {
+  r.av = okAv(r.av); r.uid = ''; S.reqs.set(r.id, r);
+  // Já foi aceito antes nesta sala? O pedido traz só uma prova presa a esta oferta; quem confere
+  // é o Rust, contra os identificadores guardados (que nunca passam pelo relay).
+  const saved = curSaved();
+  if (r.proof && saved && saved.members.length) {
+    r.uid = (await invoke('check_proof', { id: r.id, uids: saved.members.map(m => m.uid) }).catch(() => null)) || '';
+  }
+  if (r.uid) {
     // Caiu e voltou: a conexão velha dele pode ainda constar aqui; tira antes, para não virar "Nome (2)".
     const old = [...S.peers].filter(([, p]) => p.uid === r.uid).map(([pid]) => dropPeer(pid));
     toast(`${r.name} voltou para a sala`);
@@ -371,9 +377,19 @@ function sendPeer(id, obj) {
 }
 function broadcast(obj, except) { for (const id of S.peers.keys()) if (id !== except) sendPeer(id, obj); }
 function sendHost(obj) { if (S.guestDc && S.guestDc.readyState === 'open') S.guestDc.send(JSON.stringify(obj)); }
+// Herdeiro: quem está há mais tempo na sala assume se o anfitrião sair ou cair.
+function heirId() { const e = [...S.peers].find(([, p]) => p.open && p.state === 'connected'); return e ? e[0] : null; }
 function pushRoster() {
   if (S.role !== 'host') return;
-  broadcast({ t: 'roster', members: roster().filter(m => m.host || m.open || m.off).map(({ id, name, host, live, off }) => ({ id, name, host: !!host, live: !!live, off: !!off })) });
+  const heir = heirId();
+  broadcast({ t: 'roster', members: roster().filter(m => m.host || m.open || m.off).map(({ id, name, host, live, off }) => ({ id, name, host: !!host, live: !!live, off: !!off, heir: id === heir })) });
+  // Só o herdeiro recebe a lista de quem já foi aceito (com os identificadores), pelo canal cifrado,
+  // para que todos voltem direto quando ele assumir. Inclui o próprio anfitrião.
+  if (heir) {
+    const r = curSaved();
+    const members = [...(r ? r.members : []), { uid: myUid, name: myName(), av: myAv }].filter(m => m.uid !== S.peers.get(heir).uid);
+    sendPeer(heir, { t: 'heir', name: S.room.name, members });
+  }
   refresh();
 }
 function refresh() { renderPeers(); syncStreams(); }
@@ -389,6 +405,8 @@ listen('ctl-open', ({ payload: id }) => {
 listen('ctl-msg', ({ payload: [id, text] }) => {
   const p = S.peers.get(id); if (S.role !== 'host' || !p) return;
   let m; try { m = JSON.parse(text); } catch { return; }
+  // O identificador do PC chega só por aqui (canal cifrado de ponta a ponta), nunca pelo relay.
+  if (m.t === 'hi' && /^[0-9a-f]{32}$/.test(m.uid || '') && !p.uid) { p.uid = m.uid; if (p.state === 'connected') { rememberMember(p.uid, id, S.avs.get(id) || p.av); pushRoster(); } }
   if (m.t === 'live') { p.live = !!m.on; pushRoster(); }
   if (m.t === 'bye') dropPeer(id, 'saiu');
   if (m.t === 'av') { const av = okAv(m.av); S.avs.set(id, av); rememberMember(p.uid, id, av); broadcast({ t: 'av', id, av }, id); renderPeers(); labelTiles(); }
@@ -405,7 +423,8 @@ listen('peer-state', ({ payload: [id, st] }) => {
   if (S.role !== 'host') return; // no convidado esses avisos são de quem assiste a tela dele
   const p = S.peers.get(id); if (!p) return;
   p.state = st;
-  if (st === 'connected') { toast(`${id} entrou`); rememberMember(p.uid, id, S.avs.get(id) || p.av); }
+  // (pushRoster também atualiza a lista que o herdeiro guarda, com quem acabou de entrar)
+  if (st === 'connected') { toast(`${id} entrou`); rememberMember(p.uid, id, S.avs.get(id) || p.av); pushRoster(); }
   if (st === 'failed' || st === 'closed') return dropPeer(id, st === 'failed' ? 'não conseguiu conectar' : 'saiu');
   renderPeers();
 });
@@ -413,11 +432,12 @@ listen('peer-state', ({ payload: [id, st] }) => {
 function onHostMsg(text) {
   let m; try { m = JSON.parse(text); } catch { return; }
   if (m.t === 'hello') { S.me = String(m.you); S.room = { name: String(m.room || 'Sala').slice(0, 40), code: S.joinCode }; rememberRoom(S.joinCode, S.room.name, 'guest'); render(); }
-  if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off }));
+  if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off, heir: !!x.heir }));
+  if (m.t === 'heir' && Array.isArray(m.members)) S.heirPkg = { name: String(m.name || 'Sala').slice(0, 40), members: m.members.slice(0, 32).filter(x => x && /^[0-9a-f]{32}$/.test(x.uid)).map(x => ({ uid: x.uid, name: String(x.name || '').slice(0, 32), av: okAv(x.av) })) };
   if (m.t === 'av') { S.avs.set(String(m.id), okAv(m.av)); labelTiles(); }
   if (m.t === 'sig') onSig(m);
   if (m.t === 'fb') onFb({ from: String(m.from), loss: +m.loss || 0, fz: +m.fz || 0, jb: +m.jb || 0 });
-  if (m.t === 'kick' || m.t === 'closed') S.bye = m.t;
+  if (m.t === 'kick' || m.t === 'closed') { S.bye = m.t; S.byeHeir = m.heir ? String(m.heir) : null; }
   if (S.me) refresh();
 }
 
@@ -546,7 +566,11 @@ function syncStreams() {
 try { S.preview = localStorage.getItem('sl.preview') !== '0'; } catch { S.preview = true; }
 const PREVIEW = '@preview';
 async function startPreview(st) {
-  if (st.pc) return;
+  if (st.pc || st.opening) return;
+  st.opening = true;
+  await S.prevStop; // parou e voltou a transmitir rápido: espera a prévia antiga fechar
+  st.opening = false;
+  if (S.streams.get(SELF) !== st || !S.preview || st.pc) return;
   const pc = st.pc = recvPc();
   st.ms = new MediaStream();
   pc.ontrack = e => { if (e.track.kind === 'video') { st.ms.addTrack(e.track); tuneReceiver(e.receiver); attach(st); } };
@@ -561,7 +585,7 @@ function stopPreview(st) {
   if (!st.pc) return;
   st.pc.close(); st.pc = null;
   const v = st.el.querySelector('video'); if (v) v.srcObject = null;
-  invoke('remove_peer', { name: PREVIEW }).catch(() => {});
+  S.prevStop = invoke('remove_peer', { name: PREVIEW }).catch(() => {});
 }
 function paintPreview(st) {
   st.el.querySelector('.self').hidden = S.preview;
@@ -664,7 +688,7 @@ async function guestStart() {
   const pc = recvPc();
   const dc = pc.createDataChannel('ctl');
   const ms = new MediaStream();
-  dc.onopen = () => dc.send(JSON.stringify({ t: 'hi' }));
+  dc.onopen = () => dc.send(JSON.stringify({ t: 'hi', uid: myUid }));
   dc.onmessage = e => { if (S.guestPc === pc && typeof e.data === 'string') onHostMsg(e.data); };
   // O canal fecha na hora quando o anfitrião remove a pessoa ou fecha a sala.
   dc.onclose = () => { if (S.role === 'guest' && S.guestPc === pc) lost(); };
@@ -694,13 +718,42 @@ async function guestStart() {
 // Saí da sala sem querer: se foi expulso ou a sala fechou, avisa; se a conexão caiu, volta sozinho
 // (quem já foi aceito entra direto, então o anfitrião nem precisa clicar).
 function lost() {
-  const bye = S.bye, code = S.joinCode;
+  const bye = S.bye, code = S.joinCode, me = S.me, pkg = S.heirPkg;
+  // Quem assume: o que o anfitrião indicou ao sair ou, se ele caiu, o herdeiro da última lista.
+  const heir = bye === 'closed' ? S.byeHeir : bye ? null : (S.members.find(m => m.heir) || {}).id;
+  const heirName = heir && (S.members.find(m => m.id === heir) || {}).name;
   leave();
   if (bye === 'kick') return toast('O anfitrião removeu você da sala', 5000);
-  if (bye === 'closed') return toast('O anfitrião fechou a sala', 5000);
   if (!code) return toast('A conexão com a sala caiu', 5000);
-  toast('A conexão caiu. Reconectando…', 4000);
-  setTimeout(() => { if (S.role) return; openModal('join'); $('jCode').value = code; guestStart(); }, 1500);
+  if (heir && heir === me && pkg) {
+    const becomeHost = () => {
+      // Eu viro o anfitrião: mesmo código, e quem já estava na sala entra de volta sem pedir.
+      const r = rememberRoom(code, pkg.name, 'host');
+      for (const m of pkg.members) if (m.uid !== myUid && !r.members.some(x => x.uid === m.uid)) r.members.push(m);
+      saveRooms();
+      toast('O anfitrião saiu. Agora você é o anfitrião da sala.', 5000);
+      openRoom(pkg.name, code);
+    };
+    // (espera o leave() terminar de fechar a conexão antiga antes de abrir a sala de novo)
+    if (bye === 'closed') return setTimeout(() => { if (!S.role) becomeHost(); }, 600);
+    // Caiu sem aviso: pode ter sido só a MINHA conexão. Tenta voltar ao anfitrião de antes;
+    // se ninguém responder em alguns segundos, ele caiu mesmo e eu assumo.
+    toast('A conexão caiu. Reconectando…', 4000);
+    setTimeout(() => {
+      if (S.role) return;
+      openModal('join'); $('jCode').value = code; guestStart();
+      setTimeout(() => {
+        if (S.role) return; // o anfitrião antigo respondeu
+        invoke('cancel_join').catch(() => {}); closeModal();
+        setTimeout(() => { if (!S.role) becomeHost(); }, 800);
+      }, 9000);
+    }, 1000);
+    return;
+  }
+  if (bye === 'closed' && !heir) return toast('O anfitrião fechou a sala', 5000);
+  toast(heir ? `${heirName || 'Outra pessoa'} agora é o anfitrião. Reconectando…` : 'A conexão caiu. Reconectando…', 4000);
+  // Quem assume leva uns segundos para reabrir a sala; o pedido de entrada fica se repetindo até lá.
+  setTimeout(() => { if (S.role) return; openModal('join'); $('jCode').value = code; guestStart(); }, heir ? 2500 : 1500);
 }
 
 // ---------- painel de qualidade (da minha transmissão) ----------
@@ -765,7 +818,12 @@ paintRate();
 function leave() {
   const was = S.role;
   if (was === 'guest') sendHost({ t: 'bye' });
-  if (was === 'host') broadcast({ t: 'closed' });
+  if (was === 'host') {
+    // Sair passa a sala para quem está há mais tempo nela (se houver alguém).
+    const heir = heirId();
+    broadcast({ t: 'closed', heir });
+    if (heir) { const r = curSaved(); if (r) { r.role = 'guest'; saveRooms(); } toast(`${heir} agora é o anfitrião da sala`); }
+  }
   stopShare();
   for (const id of [...S.streams.keys()]) closeStream(id);
   // O anfitrião espera o aviso "sala fechada" sair antes de derrubar as conexões.
@@ -773,7 +831,7 @@ function leave() {
   $('reqs').innerHTML = '';
   S.peers.clear(); S.members = []; S.avs.clear(); S.reqs.clear(); S.failed.clear();
   if (S.guestPc) S.guestPc.close();
-  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.bye = null; S.me = null; S.focus = null;
+  S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.bye = null; S.byeHeir = null; S.heirPkg = null; S.me = null; S.focus = null;
   showTab(false); layoutTiles(); render();
 }
 $('leave').onclick = leave;
@@ -794,13 +852,14 @@ setInterval(async () => {
   syncStreams(); // também tenta de novo as telas que falharam
   for (const [id, st] of S.streams) {
     const res = st.el.querySelector('.res');
-    if (id === SELF) { res.textContent = S.enc ? `${S.enc.width}×${S.enc.height} · ${Math.round(S.enc.fps)} fps · ${S.enc.encoder}` : 'iniciando…'; continue; }
+    if (id === SELF) { res.textContent = S.enc ? `${S.enc.width}×${S.enc.height} · ${S.enc.fps >= 1 ? Math.round(S.enc.fps) + ' fps' : 'tela parada'} · ${S.enc.encoder}` : 'iniciando…'; continue; }
     const pc = st.viaHost ? S.guestPc : st.pc; if (!pc) continue;
     const prev = st.stats;
     st.stats = await readStats(pc, prev).catch(() => prev);
     feedback(id, prev, st.stats);
     const s = st.stats;
-    res.textContent = s && s.w ? ` · ${s.w}×${s.h} · ${Math.round(s.fps || 0)} fps` : ' · conectando…';
+    // Tela parada não manda quadros novos (o vídeo segue certo): diz isso em vez de "0 fps".
+    res.textContent = s && s.w ? ` · ${s.w}×${s.h} · ${s.fps >= 1 ? Math.round(s.fps) + ' fps' : 'tela parada'}` : ' · conectando…';
   }
   // O painel Conexão mostra a tela destacada (ou a primeira que estou assistindo).
   const watched = [...S.streams].filter(([id]) => id !== SELF);
@@ -838,7 +897,7 @@ async function checkUpdate() {
   } catch {}
 }
 $('updGo').onclick = () => { invoke('open_update').catch(() => {}); toast('Baixando no navegador. Feche o Lume e abra o arquivo novo.', 5000); };
-setTimeout(checkUpdate, 3000);
+if (!WEB) setTimeout(checkUpdate, 3000);
 setInterval(checkUpdate, 6 * 3600 * 1000);
 
 window.addEventListener('resize', layoutTiles);

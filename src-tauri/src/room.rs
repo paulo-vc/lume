@@ -11,7 +11,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use flate2::{read::DeflateDecoder, write::DeflateEncoder, Compression};
 use rand::RngCore;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::io::{Read, Write};
 
 pub const MAX_MEMBERS: usize = 8;
@@ -48,12 +48,22 @@ pub struct Keys {
     key: [u8; 32],
 }
 
+/// Parâmetros do scrypt (iguais na versão web, `web/lume-web.js`).
+/// Cada tentativa de adivinhar um código custa ~0,1 s de CPU e 32 MB de memória: testar os
+/// 2^60 códigos possíveis fica fora de alcance, mesmo vendo o endereço no relay público.
+const KDF_LOG_N: u8 = 15;
+const KDF_R: u32 = 8;
+const KDF_SALT: &[u8] = b"lume-v2-room";
+
 impl Keys {
     pub fn from_code(code: &str) -> Result<Self, String> {
         let code = normalize(code)?;
-        let t = Sha256::digest(format!("lume-v1-topic:{code}"));
-        let key: [u8; 32] = Sha256::digest(format!("lume-v1-key:{code}")).into();
-        let topic = format!("lume1/{}", t[..12].iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let params = scrypt::Params::new(KDF_LOG_N, KDF_R, 1, 44).map_err(|e| e.to_string())?;
+        let mut out = [0u8; 44];
+        scrypt::scrypt(code.as_bytes(), KDF_SALT, &params, &mut out).map_err(|e| e.to_string())?;
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&out[..32]);
+        let topic = format!("lume2/{}", hex::encode(&out[32..]));
         Ok(Self { topic, key })
     }
 
@@ -96,9 +106,21 @@ pub struct JoinReq {
     /// foto de perfil (data URL pequena) ou vazio
     #[serde(default)]
     pub av: String,
-    /// identificador fixo deste PC (o anfitrião reconhece quem já convidou e aceita sozinho)
+    /// Prova de que este PC já foi aceito antes: HMAC-SHA256(chave = identificador do PC,
+    /// mensagem = id + "\n" + sdp). O identificador em si nunca passa pelo relay (vai só pelo
+    /// canal cifrado de ponta a ponta, depois de conectar), e a prova não serve para outro pedido
+    /// porque está presa à oferta (impressão digital DTLS) deste pedido.
     #[serde(default)]
-    pub uid: String,
+    pub proof: String,
+}
+
+pub fn proof(uid: &str, id: &str, sdp: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(uid.as_bytes()).expect("hmac");
+    m.update(id.as_bytes());
+    m.update(b"\n");
+    m.update(sdp.as_bytes());
+    hex::encode(m.finalize().into_bytes())
 }
 
 /// Resposta (anfitrião -> convidado).
@@ -131,10 +153,19 @@ mod tests {
         assert!(normalize("curto").is_err());
     }
 
+    /// Valores de referência: a versão web (`web/lume-web.js`) tem de chegar exatamente neles.
+    #[test]
+    fn reference_vectors() {
+        let k = Keys::from_code("K7QM-2XPD-9RTA").unwrap();
+        println!("topic={} key={}", k.topic, hex::encode(k.key));
+        println!("proof={}", proof("0123456789abcdef0123456789abcdef", "a1b2c3d4e5f60718", "v=0\r\n"));
+        assert_eq!(k.topic, Keys::from_code("k7qm 2xpd 9rta").unwrap().topic);
+    }
+
     #[test]
     fn seal_open_and_wrong_code() {
         let k = Keys::from_code("K7QM-2XPD-9RTA").unwrap();
-        let req = JoinReq { id: new_id(), name: "Ana".into(), sdp: "v=0 offer".repeat(200), av: String::new(), uid: String::new() };
+        let req = JoinReq { id: new_id(), name: "Ana".into(), sdp: "v=0 offer".repeat(200), av: String::new(), proof: String::new() };
         let sealed = k.seal(&req);
         let back: JoinReq = k.open(&sealed).unwrap();
         assert_eq!(back.sdp, req.sdp);

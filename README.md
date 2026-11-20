@@ -15,6 +15,10 @@ sem instalação e sem servidor próprio. Só entra na sala quem tem o código e
 - **Salas salvas:** ficam na barra lateral. Um clique reabre a sala com o mesmo código, e quem você
   já aceitou entra direto. Quem não está na sala aparece apagado em "Fora da sala".
 - **Reconecta sozinho** se a conexão cair.
+- **A sala continua sem o anfitrião:** se quem criou a sala sai ou cai, quem está há mais tempo
+  assume com o mesmo código, e os outros reconectam nele sozinhos.
+- **Versão web:** abre no navegador do celular ou de qualquer PC, sem instalar, para assistir e entrar
+  em salas (`web/`, publicada em `docs/app/`). Criar salas e transmitir continua no app.
 - **Aviso de versão nova** na barra lateral.
 
 ## Entrar numa sala
@@ -38,6 +42,12 @@ sem instalação e sem servidor próprio. Só entra na sala quem tem o código e
 - **Sala:** cada convidado tem uma conexão com quem criou a sala (tela + canal de controle). Para
   ver a tela de outro convidado, abre-se uma conexão direta entre os dois; a negociação passa pelo
   canal de controle.
+- **Troca de anfitrião:** o anfitrião manda ao herdeiro (quem está há mais tempo), só pelo canal
+  cifrado, a lista de quem já foi aceito. Se o anfitrião sai, avisa quem assume; se cai sem avisar,
+  o herdeiro primeiro tenta voltar a ele e só assume se ninguém responder.
+- **Versão web:** `web/lume-web.js` faz no navegador o mesmo que o Rust (scrypt, ChaCha20-Poly1305,
+  MQTT por WebSocket) e a interface é a mesma do app. `node web/build.js` monta `docs/app/`.
+- **Site:** `docs/index.html` (landing page) e `docs/app/` (versão web), para o GitHub Pages.
 
 ## Rede
 
@@ -53,13 +63,17 @@ sem instalação e sem servidor próprio. Só entra na sala quem tem o código e
 
 ## Segurança
 
-- **Código da sala** (12 caracteres, ~60 bits, `room.rs`): dele saem o endereço do encontro e a chave
-  ChaCha20-Poly1305 que cifra e autentica o pedido de entrada e a resposta. Sem o código não se acha
-  a sala nem se forja um pedido. Mesmo com o código, cada pessoa precisa ser aceita na primeira vez.
+- **Código da sala** (12 caracteres, ~60 bits, sorteados pelo gerador seguro do sistema, `room.rs`):
+  dele saem, por scrypt (2^15, r=8), o endereço do encontro e a chave ChaCha20-Poly1305 que cifra e
+  autentica o pedido de entrada e a resposta. O scrypt custa ~0,1 s e 32 MB por tentativa, então
+  testar códigos às cegas (mesmo vendo os endereços no relay público) fica fora de alcance. Uma letra
+  trocada dá outro endereço e outra chave. Mesmo com o código, cada pessoa é aceita na primeira vez.
 - **Vídeo, áudio e mensagens da sala:** WebRTC cifrado (DTLS-SRTP). As impressões digitais DTLS
   viajam dentro da mensagem cifrada pelo código, então ninguém no meio consegue se passar por um dos lados.
-- **Entrada direta de quem já foi aceito:** cada PC tem um identificador aleatório guardado só nele,
-  enviado cifrado no pedido. Ele nunca é repassado aos outros participantes.
+- **Entrada direta de quem já foi aceito:** cada PC tem um identificador aleatório guardado só nele.
+  Ele só viaja pelo canal cifrado de ponta a ponta, depois de conectar; nunca pelo relay. O pedido de
+  entrada leva apenas uma prova (HMAC do identificador sobre este pedido e esta oferta), que não serve
+  para outro pedido. Assim, nem quem tem o código consegue se passar por outra pessoa.
 - **Interface:** política de conteúdo (CSP) que só permite os arquivos do próprio app; nomes e fotos
   vindos de outras pessoas são tratados como texto ou imagem embutida validada.
 - **Nada é coletado.** A única consulta externa além dos relays e do STUN é a página pública de
