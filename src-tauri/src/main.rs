@@ -89,7 +89,7 @@ fn listen_requests(app: AppHandle, keys: Keys) -> (Arc<Bus>, tokio::task::JoinHa
             if req.name.is_empty() {
                 req.name = "Convidado".into();
             }
-            let _ = app.emit("join-request", serde_json::json!({ "id": req.id, "name": req.name, "av": req.av, "uid": req.uid }));
+            let _ = app.emit("join-request", serde_json::json!({ "id": req.id, "name": req.name, "av": req.av, "proof": !req.proof.is_empty() }));
             h.pending.insert(req.id.clone(), (req, Instant::now()));
         }
     });
@@ -207,6 +207,22 @@ fn list_requests(st: State<AppState>) -> Vec<String> {
     h.pending.keys().cloned().collect()
 }
 
+/// Quem pediu para entrar já foi aceito antes? Confere a prova do pedido contra os
+/// identificadores guardados desta sala e devolve o que bateu.
+#[tauri::command]
+fn check_proof(st: State<AppState>, id: String, uids: Vec<String>) -> Option<String> {
+    let g = st.host.lock().unwrap();
+    let (req, _) = g.as_ref()?.pending.get(&id)?;
+    if req.proof.len() != 64 {
+        return None;
+    }
+    uids.into_iter().take(64).find(|u| {
+        let p = room::proof(u, &req.id, &req.sdp);
+        // comparação em tempo constante
+        p.len() == req.proof.len() && p.bytes().zip(req.proof.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0
+    })
+}
+
 /// Recado pelo canal de controle de um convidado (só o anfitrião tem esses canais).
 #[tauri::command]
 async fn ctl_send(st: State<'_, AppState>, name: String, text: String) -> Result<(), String> {
@@ -216,6 +232,10 @@ async fn ctl_send(st: State<'_, AppState>, name: String, text: String) -> Result
 /// Outro participante quer assistir a minha tela: abre uma conexão direta só para ele.
 #[tauri::command]
 async fn accept_viewer(st: State<'_, AppState>, name: String, offer_sdp: String) -> Result<String, String> {
+    // Limite de quem assiste a minha tela (evita alguém da sala abrir conexões sem parar).
+    if st.peers.lock().await.len() >= room::MAX_MEMBERS + 2 && !st.peers.lock().await.contains_key(&name) {
+        return Err("Muita gente assistindo".into());
+    }
     if let Some(old) = st.peers.lock().await.remove(&name) {
         let _ = old.close().await;
     }
@@ -304,7 +324,9 @@ fn set_quality(st: State<AppState>, quality: Quality) {
 #[tauri::command]
 async fn join_room(st: State<'_, AppState>, code: String, name: String, av: String, uid: String, offer_sdp: String) -> Result<String, String> {
     let keys = Keys::from_code(&code)?;
-    let req = JoinReq { id: room::new_id(), name: name.chars().take(32).collect(), sdp: offer_sdp, av, uid: uid.chars().take(40).collect() };
+    let id = room::new_id();
+    let proof = if uid.is_empty() { String::new() } else { room::proof(&uid, &id, &offer_sdp) };
+    let req = JoinReq { id, name: name.chars().take(32).collect(), sdp: offer_sdp, av, proof };
     let (bus, mut rx) = Bus::start(keys.answer(&req.id));
     let cancel = Arc::new(Notify::new());
     *st.guest_cancel.lock().unwrap() = Some(cancel.clone());
@@ -387,6 +409,7 @@ fn main() {
             deny_request,
             remove_peer,
             list_requests,
+            check_proof,
             ctl_send,
             accept_viewer,
             drop_viewers,

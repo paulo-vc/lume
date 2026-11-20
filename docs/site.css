@@ -1,0 +1,208 @@
+/* Lume — landing page. As cores são as do próprio app (preto e branco). */
+:root {
+  --bg: #0b0b0c;
+  --surface: #161618;
+  --surface2: #1f1f22;
+  --ink: #f2f2f3;
+  --muted: #9a9aa1;
+  --dim: #55555c;
+  --accent: #f2f2f3;
+  --accent-ink: #0b0b0c;
+  --m: clamp(16px, 2.6vw, 40px);
+  --step-small: 14px;
+  --step-body: clamp(17px, 16px + 0.2vw, 19px);
+  --step-lead: clamp(21px, 18px + 0.6vw, 26px);
+  --step-head: clamp(26px, 20px + 1.4vw, 40px);
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body { background: var(--bg); color: var(--ink); font: 400 var(--step-body)/1.5 "Red Hat Text", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+img { display: block; max-width: 100%; height: auto; }
+a { color: inherit; }
+:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+::selection { background: var(--ink); color: var(--bg); }
+h2 { font: 700 var(--step-head)/1.1 "Red Hat Text", sans-serif; letter-spacing: -0.02em; }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 22px; background: var(--accent); color: var(--accent-ink); font-weight: 700; text-decoration: none; border-radius: 0; transition: transform .15s var(--ease), background .15s; }
+.btn:hover { background: #fff; }
+.btn:active { transform: scale(.97); }
+.btn.big { min-height: 56px; padding: 0 28px; font-size: var(--step-body); }
+.plain { color: var(--ink); text-underline-offset: 5px; font-weight: 500; }
+.plain:hover { text-decoration-thickness: 3px; }
+
+/* ---------- abertura: o nome como monumento ---------- */
+.hero { position: relative; min-height: 100svh; padding: 0 var(--m); display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr auto; overflow: hidden; }
+.nav { display: flex; justify-content: space-between; align-items: center; padding-top: 24px; font-size: var(--step-small); }
+.mono { font-size: var(--step-head); text-decoration: none; line-height: 1; width: 44px; height: 44px; display: grid; place-items: center; background: var(--ink); color: var(--bg); }
+.links { display: flex; gap: clamp(16px, 2.4vw, 36px); align-items: center; }
+.links a:not(.btn) { text-decoration: none; color: var(--muted); transition: color .15s; }
+.links a:not(.btn):hover { color: var(--ink); }
+.name { align-self: end; margin: 0 0 -0.02em -0.04em; font: 900 clamp(100px, 33.6vw, 680px)/0.8 "Red Hat Display", sans-serif; white-space: nowrap; letter-spacing: -0.045em; text-transform: uppercase; }
+.name .line { display: block; overflow: hidden; padding-bottom: .02em; }
+.name .line > span { display: inline-block; }
+.name .dim { color: var(--dim); display: inline; }
+.pitch { justify-self: end; align-self: start; width: min(100%, 30ch * 1.25); padding-top: 8vh; display: grid; gap: 22px; text-align: right; }
+.pitch > p:first-child { font-size: var(--step-lead); line-height: 1.35; }
+.acts { display: flex; gap: 24px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.fine { color: var(--muted); font-size: var(--step-small); }
+
+/* ---------- vitrine: a imagem quadrada e o texto curto ---------- */
+.show { display: grid; grid-template-columns: 1fr 1fr; min-height: 88svh; background: var(--surface); }
+.plate { margin: 40px; align-self: center; aspect-ratio: 1; overflow: hidden; background: var(--bg); }
+.plate img { width: 100%; height: 100%; object-fit: cover; transition: opacity .35s var(--ease); animation: drift 24s ease-in-out infinite alternate; }
+@keyframes drift { from { transform: scale(1); } to { transform: scale(1.06); } }
+.side { display: flex; flex-direction: column; justify-content: space-between; padding: 40px var(--m) 40px 0; gap: 40px; }
+.tabs { display: flex; gap: 28px; }
+.tabs button { background: none; border: 0; color: var(--muted); font: 500 var(--step-body) "Red Hat Text", sans-serif; cursor: pointer; padding: 6px 0; transition: color .15s; }
+.tabs button[aria-selected="true"] { color: var(--ink); font-weight: 700; }
+.tabs button:hover { color: var(--ink); }
+.say h2 { margin-bottom: 48px; }
+.say p { max-width: 34ch; color: var(--muted); }
+.say p + p { margin-top: 16px; }
+.say p:first-of-type { color: var(--ink); }
+.cells { display: grid; grid-template-columns: 1fr 1fr; }
+.cell { min-height: 72px; display: flex; align-items: center; padding: 0 22px; text-decoration: none; font-weight: 700; transition: background .15s, color .15s; }
+.cell.ink { background: var(--ink); color: var(--bg); }
+.cell.tone { background: var(--surface2); color: var(--ink); }
+.cell.ink:hover { background: #fff; }
+.cell.tone:hover { background: #2a2a2e; }
+
+/* ---------- como funciona: uma coluna de leitura ---------- */
+.how { padding: 180px var(--m); }
+.how .col { width: min(100%, 580px); margin-left: 30vw; }
+.how h2 { margin-bottom: 48px; }
+.stage + .stage { margin-top: 72px; }
+.stage p { color: var(--muted); font-size: var(--step-body); line-height: 1.6; }
+.stage b { color: var(--ink); font-weight: 700; }
+.stage img { margin-top: 20px; width: 100%; background: var(--surface); }
+
+/* ---------- o que vem junto: colunas de nomes, um tamanho só ---------- */
+.feat { padding: 20vh var(--m); background: var(--surface); }
+.feat h2 { margin-bottom: 96px; }
+.cols { display: grid; grid-template-columns: repeat(12, 1fr); column-gap: 24px; }
+.group:nth-child(1) { grid-column: 1 / span 3; }
+.group:nth-child(2) { grid-column: 4 / span 3; }
+.group:nth-child(3) { grid-column: 7 / span 3; }
+.desc { grid-column: 10 / span 3; grid-row: 1; color: var(--ink); line-height: 1.5; min-height: 6em; }
+.group h3 { font: 700 var(--step-body)/1.25 "Red Hat Text", sans-serif; margin-bottom: 1.25em; }
+.group ul { list-style: none; }
+.group li { color: var(--muted); font-size: var(--step-body); line-height: 1.25; padding: 4px 0; cursor: default; transition: color .15s; }
+.group li:hover, .group li:focus, .group li.on { color: var(--ink); outline: none; }
+.sum { display: none; }
+
+/* ---------- números ---------- */
+.stats { display: grid; grid-template-columns: repeat(12, 1fr); column-gap: 24px; padding: 18vh var(--m); align-items: start; }
+.rows { grid-column: 2 / span 6; }
+.rows h2 { margin: 0 0 56px 156px; font-size: var(--step-lead); }
+.rows dl > div { display: grid; grid-template-columns: 132px 1fr; column-gap: 24px; align-items: baseline; }
+.rows dl > div + div { margin-top: 28px; }
+.rows dt { text-align: right; font: 500 var(--step-lead)/1.1 "Red Hat Text", sans-serif; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rows dd { color: var(--muted); max-width: 40ch; }
+.note { margin: 40px 0 0 156px; color: var(--muted); font-size: var(--step-small); max-width: 46ch; }
+.phone { grid-column: 9 / span 3; margin-top: 80px; background: var(--surface); }
+
+/* ---------- perguntas: perguntas grandes, respostas ao lado ---------- */
+.faq { padding: 160px var(--m) 180px; }
+.row { display: grid; grid-template-columns: repeat(12, 1fr); column-gap: 24px; align-items: baseline; }
+.row + .row { margin-top: 84px; }
+.row h2, .row h3 { grid-column: 1 / span 6; font: 500 var(--step-head)/1.1 "Red Hat Text", sans-serif; letter-spacing: -0.015em; }
+.row.head h2 { color: var(--muted); }
+.ans { grid-column: 8 / span 5; max-width: 44ch; }
+.ans p { line-height: 1.55; }
+.ans a { text-underline-offset: 4px; }
+
+/* o código ao vivo */
+.lab { margin-top: 28px; background: var(--surface); padding: 22px; display: grid; gap: 16px; }
+.lab label { font-weight: 700; }
+.field { display: flex; gap: 8px; flex-wrap: wrap; }
+.field input { flex: 1 1 14ch; min-width: 0; height: 52px; padding: 0 14px; background: var(--bg); color: var(--ink); border: 0; border-radius: 0; font: 700 var(--step-lead)/1 "Red Hat Text", sans-serif; letter-spacing: .08em; font-variant-numeric: tabular-nums; text-transform: uppercase; }
+.field input:focus-visible { outline: 3px solid var(--ink); outline-offset: 0; }
+.field button { height: 52px; padding: 0 18px; background: var(--surface2); color: var(--ink); border: 0; font: 700 var(--step-small) "Red Hat Text", sans-serif; cursor: pointer; transition: background .15s, transform .1s; }
+.field button:hover { background: #2a2a2e; }
+.field button:active { transform: scale(.97); }
+.out { display: grid; gap: 12px; }
+.out dt { color: var(--muted); font-size: var(--step-small); }
+.out dd { font-size: var(--step-small); line-height: 1.4; word-break: break-all; font-variant-numeric: tabular-nums; }
+.out dd span.same { color: var(--ink); }
+.out dd span.diff { color: var(--muted); }
+.out dd.flash { animation: flash .5s var(--ease); }
+@keyframes flash { from { opacity: .25; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.hint { color: var(--muted); font-size: var(--step-small); }
+
+/* ---------- chamada final: a palavra é o botão ---------- */
+.cta { position: relative; display: block; min-height: 60svh; background: var(--accent); color: var(--accent-ink); text-decoration: none; overflow: hidden; }
+.cta-say { position: absolute; top: 24px; left: var(--m); font-size: var(--step-body); max-width: 30ch; font-weight: 500; }
+.cta-arrow { position: absolute; top: 24px; right: var(--m); width: 48px; height: 48px; transition: transform .2s var(--ease); }
+.cta-word { position: absolute; left: var(--m); bottom: 24px; font: 900 clamp(90px, 26.5vw, 520px)/0.78 "Red Hat Display", sans-serif; letter-spacing: -0.05em; text-transform: uppercase; }
+.cta:hover, .cta:focus-visible { background: var(--bg); color: var(--ink); outline: none; }
+.cta:hover .cta-arrow { transform: translate(6px, -6px); }
+
+/* ---------- rodapé ---------- */
+.foot { min-height: 100svh; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr auto auto; background: var(--ink); color: var(--bg); padding: 40px var(--m) 24px; }
+.fcols { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; font-size: var(--step-small); }
+.fcols > div { display: flex; flex-direction: column; gap: 6px; }
+.fcols b { font-weight: 700; }
+.fcols span, .fcols a { color: #4a4a50; }
+.fcols a { text-decoration: none; }
+.fcols a:hover { color: var(--bg); text-decoration: underline; }
+.fword { grid-row: 3; font: 900 33.6vw/0.8 "Red Hat Display", sans-serif; letter-spacing: -0.05em; margin-left: -.03em; white-space: nowrap; }
+.legal { grid-row: 4; margin-top: 20px; font-size: var(--step-small); color: #4a4a50; }
+
+/* ---------- movimento ---------- */
+@keyframes rise { from { transform: translateY(105%); } to { transform: none; } }
+@keyframes up { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
+.js .name .line > span { animation: rise .9s cubic-bezier(.16, 1, .3, 1) both; }
+.js .name .line > span.dim { animation-delay: .11s; }
+.js .pitch { animation: up .7s var(--ease) .45s both; }
+.js [data-r] > *, .js [data-r].plate { opacity: 0; transform: translateY(24px); transition: opacity .7s var(--ease), transform .7s var(--ease); }
+.js [data-r].in > *, .js [data-r].plate.in { opacity: 1; transform: none; }
+.js [data-r].in > *:nth-child(2) { transition-delay: .08s; }
+.js [data-r].in > *:nth-child(3) { transition-delay: .16s; }
+.js [data-r].in > *:nth-child(4) { transition-delay: .24s; }
+@media (prefers-reduced-motion: reduce) {
+  .js .name .line > span, .js .pitch { animation: none; }
+  .js [data-r] > *, .js [data-r].plate { opacity: 1; transform: none; transition: none; }
+  .plate img { animation: none; }
+  html { scroll-behavior: auto; }
+}
+
+/* ---------- celular ---------- */
+@media (max-width: 860px) {
+  .links a:not(.btn):not(:nth-child(3)) { display: none; }
+  .name { font-size: 33vw; }
+  .pitch { justify-self: stretch; text-align: left; padding-top: 12vh; width: 100%; }
+  .acts { justify-content: flex-start; }
+  .show { grid-template-columns: 1fr; }
+  .plate { margin: 16px; }
+  .side { padding: 0 16px 32px; }
+  .tabs button { font-size: var(--step-body); }
+  .say h2 { margin-bottom: 24px; }
+  .cells { grid-template-columns: 1fr; }
+  .cell { min-height: 60px; }
+  .how { padding: 110px 20px; }
+  .how .col { margin-left: 0; }
+  .stage + .stage { margin-top: 56px; }
+  .feat h2 { margin-bottom: 48px; }
+  .cols { display: block; }
+  .group + .group { margin-top: 40px; }
+  .group li { font-size: var(--step-body); line-height: 1.4; }
+  .sum { display: block; margin-top: 12px; color: var(--muted); }
+  .desc { display: none; }
+  .stats { display: block; }
+  .rows h2 { margin-left: 0; }
+  .rows dl > div { grid-template-columns: 88px 1fr; column-gap: 16px; }
+  .rows dt { font-size: var(--step-head); }
+  .note { margin-left: 0; }
+  .phone { width: 56%; margin: 56px 0 0 auto; }
+  .row { display: block; }
+  .row + .row { margin-top: 56px; }
+  .row h2, .row h3 { font-size: var(--step-head); }
+  .ans { margin-top: 12px; }
+  .cta { min-height: 46svh; }
+  .cta-say { font-size: var(--step-body); max-width: 22ch; }
+  .cta-arrow { width: 32px; height: 32px; }
+  .cta-word { font-size: 25vw; }
+  .fcols { grid-template-columns: 1fr 1fr; row-gap: 32px; }
+}

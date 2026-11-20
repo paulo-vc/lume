@@ -683,7 +683,18 @@ fn encode_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(_) => match &last_raw {
                 Some(r) if idr.load(Ordering::SeqCst) || v != seen => r.clone(),
-                _ => continue,
+                _ => {
+                    // Tela parada: avisa mesmo assim (0 fps), para a interface não ficar em "iniciando…".
+                    if window.elapsed() >= Duration::from_secs(2) && enc.is_some() {
+                        let s = window.elapsed().as_secs_f32();
+                        let (w, h) = dims.0;
+                        (app)("enc-stats", serde_json::to_value(EncStats { width: w, height: h, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone() }).unwrap());
+                        n = 0;
+                        bytes = 0;
+                        window = Instant::now();
+                    }
+                    continue;
+                }
             },
         };
         if v != seen {
