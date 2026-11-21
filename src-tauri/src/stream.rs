@@ -26,7 +26,7 @@ pub type Emit = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 use tokio::sync::{broadcast, mpsc as tmpsc};
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
-use webrtc::media_stream::track_local::TrackLocal;
+use webrtc::media_stream::track_local::{TrackLocal, TrackLocalEvent};
 use webrtc::media_stream::Track;
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCIceGatheringState, RTCPeerConnectionState,
@@ -273,6 +273,29 @@ impl Engine {
         pc.set_remote_description(offer).await.map_err(|x| e(&x))?;
         let sender = pc.add_track(track.clone() as Arc<dyn TrackLocal>).await.map_err(|x| e(&x))?;
         let asender = pc.add_track(atrack.clone() as Arc<dyn TrackLocal>).await.map_err(|x| e(&x))?;
+        // Pedidos de quadro-chave de quem assiste (PLI/FIR): quando a imagem estraga por pacote
+        // perdido, o navegador pede uma imagem completa. Sem atender, a tela ficava parada até o
+        // próximo quadro-chave automático. Limite de um a cada 0,5 s (vários pedidos viram um).
+        for (t, video) in [(track.clone(), true), (atrack.clone(), false)] {
+            let eng = self.clone();
+            tokio::spawn(async move {
+                let mut last: Option<Instant> = None;
+                while let Some(TrackLocalEvent::OnRtcpPacket(pkts)) = t.poll().await {
+                    let wants_key = pkts.iter().any(|p| {
+                        let a = p.as_any();
+                        a.is::<rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
+                            || a.is::<rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest>()
+                    });
+                    if video && wants_key {
+                        KEY_REQUESTS.fetch_add(1, Ordering::Relaxed);
+                        if last.is_none_or(|l| l.elapsed() >= Duration::from_millis(500)) {
+                            last = Some(Instant::now());
+                            eng.request_keyframe();
+                        }
+                    }
+                }
+            });
+        }
         let answer = pc.create_answer(None).await.map_err(|x| e(&x))?;
         pc.set_local_description(answer).await.map_err(|x| e(&x))?;
         let _ = tokio::time::timeout(Duration::from_secs(5), gather_rx.recv()).await;
@@ -411,6 +434,8 @@ struct EncStats {
     /// quadros que chegaram da captura e quantos o encoder devolveu vazios (diagnóstico)
     src_fps: f32,
     skipped: u32,
+    /// pedidos de quadro-chave recebidos desde o início da transmissão
+    key_requests: u32,
 }
 
 /// Se o encoder de hardware falhar durante o uso, não tenta de novo nesta sessão.
@@ -426,7 +451,8 @@ enum VideoEnc {
 impl VideoEnc {
     /// `src` é o quadro que chegou da captura (diz se ele está na GPU e o tamanho original).
     fn new(q: &Quality, bps: u32, w: usize, h: usize, src: &RawFrame, app: &Emit) -> Option<Self> {
-        let (fps, br, gop) = (q.fps, bps, q.fps * 3);
+        // Quadro-chave automático a cada 10 s só por segurança: quem assiste pede um na hora quando precisa.
+        let (fps, br, gop) = (q.fps, bps, q.fps * 10);
         if let Some(g) = &src.gpu {
             // Quadro só na GPU: precisa do encoder de hardware lendo texturas.
             if !HW_BROKEN.load(Ordering::SeqCst) {
@@ -503,7 +529,7 @@ fn make_encoder(q: &Quality, bps: u32) -> Option<Encoder> {
         .max_frame_rate(FrameRate::from_hz(q.fps as f32))
         .rate_control_mode(if q.pri == "detail" { RateControlMode::Quality } else { RateControlMode::Bitrate })
         .skip_frames(q.pri != "detail")
-        .intra_frame_period(IntraFramePeriod::from_num_frames(q.fps * 3))
+        .intra_frame_period(IntraFramePeriod::from_num_frames(q.fps * 10))
         .num_threads(4);
     Encoder::with_api_config(OpenH264API::from_source(), cfg).ok()
 }
@@ -648,6 +674,8 @@ await pc.setRemoteDescription({type:'answer',sdp:a});})()</script>"#;
 
 /// Bitrate ajustado pela qualidade automática (kbps; 0 = usa o máximo escolhido).
 static AUTO_KBPS: AtomicU32 = AtomicU32::new(0);
+/// Pedidos de quadro-chave recebidos de quem assiste (diagnóstico, vai nas estatísticas).
+static KEY_REQUESTS: AtomicU32 = AtomicU32::new(0);
 
 /// Bitrate que o encoder deve usar agora: o automático, sem passar do máximo escolhido.
 fn target_bps(q: &Quality) -> u32 {
@@ -695,7 +723,7 @@ fn encode_loop(
                     if window.elapsed() >= Duration::from_secs(2) && enc.is_some() {
                         let s = window.elapsed().as_secs_f32();
                         let (w, h) = dims.0;
-                        (app)("enc-stats", serde_json::to_value(EncStats { width: w, height: h, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone(), src_fps: got as f32 / s, skipped }).unwrap());
+                        (app)("enc-stats", serde_json::to_value(EncStats { width: w, height: h, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone(), src_fps: got as f32 / s, skipped, key_requests: KEY_REQUESTS.load(Ordering::Relaxed) }).unwrap());
                         n = 0;
                         bytes = 0;
                         got = 0;
@@ -758,7 +786,7 @@ fn encode_loop(
 
         if window.elapsed() >= Duration::from_secs(1) {
             let s = window.elapsed().as_secs_f32();
-            (app)("enc-stats", serde_json::to_value(EncStats { width: out_dims.0, height: out_dims.1, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone(), src_fps: got as f32 / s, skipped }).unwrap());
+            (app)("enc-stats", serde_json::to_value(EncStats { width: out_dims.0, height: out_dims.1, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone(), src_fps: got as f32 / s, skipped, key_requests: KEY_REQUESTS.load(Ordering::Relaxed) }).unwrap());
             n = 0;
             bytes = 0;
             got = 0;
