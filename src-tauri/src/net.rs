@@ -140,6 +140,54 @@ pub async fn close_port(port: u16) {
     }
 }
 
+/// Para as conexões do navegador interno (quem assiste): abre no roteador as portas UDP que a
+/// oferta dele vai usar e acrescenta o IP público como candidato. Assim, quem transmite consegue
+/// chegar até aqui mesmo se a rede DELE for restritiva. Sem UPnP, devolve a oferta como veio.
+pub async fn expose_offer(sdp: &str) -> String {
+    probe().await;
+    let (gw, local, external) = {
+        let st = STATE.lock().await;
+        match (st.gw.clone(), st.local, st.external) {
+            (Some(g), Some(l), Some(e)) if !is_cgnat(e) => (g, l, e),
+            _ => return sdp.to_string(),
+        }
+    };
+    // Candidatos locais UDP desta máquina (o WebView2 pode esconder o IP como "xxxx.local").
+    let mut ports = vec![];
+    for line in sdp.lines() {
+        let Some(rest) = line.trim_end().strip_prefix("a=candidate:") else { continue };
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        if f.len() >= 8 && f[1] == "1" && f[2].eq_ignore_ascii_case("udp") && f[7] == "host" && (f[4] == local.to_string() || f[4].ends_with(".local")) {
+            if let Ok(p) = f[5].parse::<u16>() {
+                if !ports.contains(&p) && ports.len() < 4 {
+                    ports.push(p);
+                }
+            }
+        }
+    }
+    let mut opened = vec![];
+    for p in ports {
+        let addr = SocketAddr::new(IpAddr::V4(local), p);
+        if tokio::time::timeout(Duration::from_secs(3), gw.add_port(PortMappingProtocol::UDP, p, addr, 3600, "Lume"))
+            .await
+            .is_ok_and(|r| r.is_ok())
+        {
+            opened.push(p);
+        }
+    }
+    let mut out = String::with_capacity(sdp.len() + 200);
+    for line in sdp.split_inclusive('\n') {
+        out.push_str(line);
+        let Some(rest) = line.trim_end().strip_prefix("a=candidate:") else { continue };
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        if f.len() >= 8 && f[1] == "1" && f[7] == "host" && f[5].parse::<u16>().is_ok_and(|p| opened.contains(&p)) && (f[4] == local.to_string() || f[4].ends_with(".local")) {
+            let prio = (f[3].parse::<u64>().unwrap_or(0) / 2).max(1);
+            out.push_str(&format!("a=candidate:{}9 1 udp {} {} {} typ srflx raddr 0.0.0.0 rport 0\r\n", f[0], prio, external, f[5]));
+        }
+    }
+    out
+}
+
 /// Acrescenta o endereço público como candidato (srflx) ao lado do candidato local dessa porta.
 pub fn add_public_candidate(sdp: &str, m: Mapping) -> String {
     let mut out = String::with_capacity(sdp.len() + 200);

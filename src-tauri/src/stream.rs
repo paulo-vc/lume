@@ -198,7 +198,9 @@ impl Engine {
             ..Default::default()
         };
         me.register_codec(opus.clone(), RtpCodecKind::Audio).map_err(|x| e(&x))?;
-        let registry = register_default_interceptors(Registry::new(), &mut me).map_err(|x| e(&x))?;
+        let registry = register_default_interceptors(Registry::new(), &mut me)
+            .map_err(|x| e(&x))?
+            .with(rtc::interceptor::Slot::from(crate::keyreq::SLOT), crate::keyreq::KeyframeRequests::default());
         let config = RTCConfigurationBuilder::new()
             .with_ice_servers(vec![RTCIceServer {
                 urls: vec!["stun:stun.l.google.com:19302".into(), "stun:stun.cloudflare.com:3478".into()],

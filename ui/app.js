@@ -224,6 +224,8 @@ $('peers').onclick = e => {
 function dropPeer(id, why) {
   if (!S.peers.delete(id)) return Promise.resolve();
   S.avs.delete(id);
+  stopPull(id);
+  invoke('relay_drop_viewer', { viewer: id }).catch(() => {});
   const done = invoke('remove_peer', { name: id }).catch(() => {});
   if (why) toast(`${id} ${why}`);
   pushRoster();
@@ -407,7 +409,7 @@ listen('ctl-msg', ({ payload: [id, text] }) => {
   let m; try { m = JSON.parse(text); } catch { return; }
   // O identificador do PC chega só por aqui (canal cifrado de ponta a ponta), nunca pelo relay.
   if (m.t === 'hi' && /^[0-9a-f]{32}$/.test(m.uid || '') && !p.uid) { p.uid = m.uid; if (p.state === 'connected') { rememberMember(p.uid, id, S.avs.get(id) || p.av); pushRoster(); } }
-  if (m.t === 'live') { p.live = !!m.on; pushRoster(); }
+  if (m.t === 'live') { p.live = !!m.on; if (!p.live) stopPull(id); pushRoster(); }
   if (m.t === 'bye') dropPeer(id, 'saiu');
   if (m.t === 'av') { const av = okAv(m.av); S.avs.set(id, av); rememberMember(p.uid, id, av); broadcast({ t: 'av', id, av }, id); renderPeers(); labelTiles(); }
   if (m.t === 'fb') {
@@ -416,7 +418,16 @@ listen('ctl-msg', ({ payload: [id, text] }) => {
   }
   if (m.t === 'sig') {
     m.from = id; // quem mandou é quem o canal diz que é, não o que veio escrito
-    if (m.to === HOST) onSig(m); else if (S.peers.has(m.to)) sendPeer(m.to, m);
+    if (m.to === HOST) onSig(m);
+    else if (m.to === '@relay') { if (m.kind === 'answer' && S.pulls.has(id)) invoke('relay_pull_answer', { source: id, sdp: String(m.sdp) }).catch(() => {}); }
+    else if (S.peers.has(m.to)) sendPeer(m.to, m);
+  }
+  // Um convidado não conseguiu ver outro direto: repasso a tela pelo meu Lume.
+  if (m.t === 'relayreq') {
+    const of = String(m.of);
+    if (of !== id && S.peers.has(of) && S.peers.get(of).live) {
+      relayFor(of, id, String(m.sdp)).then(ans => sendPeer(id, { t: 'sig', kind: 'answer', from: of, sdp: ans })).catch(() => {});
+    }
   }
 });
 listen('peer-state', ({ payload: [id, st] }) => {
@@ -520,10 +531,18 @@ function closeStream(id) {
   if (st.pc) st.pc.close();
   const v = st.el.querySelector('video'); if (v) v.srcObject = null;
 }
+// Telas que eu vejo pelo anfitrião porque a conexão direta com quem transmite falhou.
+S.relayed = new Set();
 function failStream(id, st) {
   if (S.streams.get(id) !== st) return;
   closeStream(id); layoutTiles();
-  if (!S.failed.has(id)) toast(`Não foi possível conectar direto com ${nameOf(id)} (rede com NAT restritivo). Tentando de novo…`, 5000);
+  // Primeira falha da conexão direta: passa a ver essa tela pelo anfitrião (que já fala com os dois).
+  if (!st.relay) {
+    S.relayed.add(id);
+    toast(`Sem conexão direta com ${nameOf(id)}. Vendo pela retransmissão do anfitrião…`, 5000);
+    return void setTimeout(() => { if (!S.streams.has(id)) syncStreams(); }, 300);
+  }
+  if (!S.failed.has(id)) toast(`Não foi possível ver a tela de ${nameOf(id)}. Tentando de novo…`, 5000);
   S.failed.set(id, Date.now());
 }
 async function openStream(id) {
@@ -531,19 +550,51 @@ async function openStream(id) {
   S.streams.set(id, st);
   // A tela do anfitrião já chega pela conexão de entrada do convidado.
   if (S.role === 'guest' && id === HOST) { st.ms = S.hostMs; st.viaHost = true; attach(st); return; }
+  let forced = false; try { forced = localStorage.getItem('sl.forceRelay') === '1'; } catch {}
+  st.relay = S.relayed.has(id) || (forced && id !== HOST);
   const pc = st.pc = recvPc();
   pc.ontrack = e => { st.ms.addTrack(e.track); tuneReceiver(e.receiver); attach(st); };
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected') { clearTimeout(st.timer); S.failed.delete(id); }
     if (pc.connectionState === 'failed') failStream(id, st);
   };
-  st.timer = setTimeout(() => { if (pc.connectionState !== 'connected') failStream(id, st); }, 25000);
+  st.timer = setTimeout(() => { if (pc.connectionState !== 'connected') failStream(id, st); }, st.relay ? 30000 : 20000);
   try {
     await pc.setLocalDescription(await pc.createOffer());
     await waitIce(pc);
-    if (S.streams.get(id) === st) sendSig(id, 'offer', pc.localDescription.sdp);
+    let sdp = pc.localDescription.sdp;
+    if (S.streams.get(id) !== st) return;
+    if (st.relay) {
+      // Pelo anfitrião: ele puxa a tela de quem transmite e repassa para mim.
+      if (S.role === 'host') {
+        const ans = await relayFor(id, HOST, sdp);
+        if (S.streams.get(id) === st) await pc.setRemoteDescription({ type: 'answer', sdp: ans });
+      } else sendHost({ t: 'relayreq', of: id, sdp });
+      return;
+    }
+    // Direto: abre no meu roteador as portas desta conexão, para quem transmite conseguir chegar aqui.
+    if (!WEB) sdp = (await invoke('expose_offer', { sdp }).catch(() => null)) || sdp;
+    if (S.streams.get(id) === st) sendSig(id, 'offer', sdp);
   } catch { failStream(id, st); }
 }
+
+// ---------- retransmissão (anfitrião) ----------
+// O Lume nativo do anfitrião puxa a tela de quem transmite uma vez só e repassa os mesmos pacotes
+// para cada pessoa que não conseguiu conexão direta (relay.rs).
+S.pulls = new Map();
+function ensurePull(of) {
+  if (!S.pulls.has(of)) {
+    const p = invoke('relay_pull_offer', { source: of }).then(offer => sendPeer(of, { t: 'sig', kind: 'offer', from: '@relay', sdp: offer }));
+    p.catch(() => S.pulls.delete(of));
+    S.pulls.set(of, p);
+  }
+  return S.pulls.get(of);
+}
+async function relayFor(of, viewer, sdp) {
+  await ensurePull(of);
+  return invoke('relay_viewer', { source: of, viewer, offerSdp: sdp });
+}
+function stopPull(of) { if (S.pulls.delete(of)) invoke('relay_stop', { source: of }).catch(() => {}); }
 // Deixa a grade igual à sala: uma tela para cada pessoa que está transmitindo.
 function syncStreams() {
   if (!S.role || !S.me) return;
@@ -838,7 +889,7 @@ function leave() {
   // O anfitrião espera o aviso "sala fechada" sair antes de derrubar as conexões.
   if (was) setTimeout(() => { if (!S.role) invoke('close_room').catch(() => {}); }, was === 'host' ? 400 : 0);
   $('reqs').innerHTML = '';
-  S.peers.clear(); S.members = []; S.avs.clear(); S.reqs.clear(); S.failed.clear();
+  S.peers.clear(); S.members = []; S.avs.clear(); S.reqs.clear(); S.failed.clear(); S.relayed.clear(); S.pulls.clear();
   if (S.guestPc) S.guestPc.close();
   S.guestPc = S.guestDc = S.hostMs = null; S.role = null; S.room = null; S.joinCode = null; S.bye = null; S.byeHeir = null; S.heirPkg = null; S.me = null; S.focus = null;
   showTab(false); layoutTiles(); render();

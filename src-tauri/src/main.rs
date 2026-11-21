@@ -3,8 +3,10 @@
 mod audio;
 mod capture;
 mod gpu;
+mod keyreq;
 mod mf;
 mod net;
+mod relay;
 mod room;
 mod signal;
 mod stream;
@@ -47,6 +49,7 @@ struct AppState {
     guest_cancel: Mutex<Option<Arc<Notify>>>,
     engine: Arc<Engine>,
     peers: tokio::sync::Mutex<HashMap<String, Arc<dyn PeerConnection>>>,
+    relay: relay::Relay,
 }
 
 #[derive(Serialize)]
@@ -270,6 +273,7 @@ async fn remove_peer(st: State<'_, AppState>, name: String) -> Result<(), String
 async fn close_room(st: State<'_, AppState>) -> Result<(), String> {
     st.engine.stop_share();
     st.engine.ctl_clear();
+    st.relay.stop_all().await;
     let peers: Vec<_> = st.peers.lock().await.drain().map(|(_, p)| p).collect();
     for p in peers {
         let _ = p.close().await;
@@ -377,6 +381,47 @@ async fn net_status() -> net::Status {
     net::status().await
 }
 
+// ---------- retransmissão pelo anfitrião (ver relay.rs) ----------
+
+#[tauri::command]
+async fn relay_pull_offer(st: State<'_, AppState>, source: String) -> Result<String, String> {
+    st.relay.pull_offer(&source).await
+}
+
+#[tauri::command]
+async fn relay_pull_answer(st: State<'_, AppState>, source: String, sdp: String) -> Result<(), String> {
+    st.relay.pull_answer(&source, sdp).await
+}
+
+#[tauri::command]
+async fn relay_viewer(st: State<'_, AppState>, source: String, viewer: String, offer_sdp: String) -> Result<String, String> {
+    if offer_sdp.len() > 64 * 1024 {
+        return Err("Oferta grande demais".into());
+    }
+    st.relay.add_viewer(&source, &viewer, offer_sdp).await
+}
+
+#[tauri::command]
+async fn relay_drop_viewer(st: State<'_, AppState>, viewer: String) -> Result<(), String> {
+    st.relay.drop_viewer(&viewer).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn relay_stop(st: State<'_, AppState>, source: String) -> Result<(), String> {
+    st.relay.stop(&source).await;
+    Ok(())
+}
+
+/// Oferta do navegador interno com a porta aberta no roteador e o IP público (ver net::expose_offer).
+#[tauri::command]
+async fn expose_offer(sdp: String) -> String {
+    if sdp.len() > 64 * 1024 {
+        return sdp;
+    }
+    net::expose_offer(&sdp).await
+}
+
 #[tauri::command]
 fn cancel_join(st: State<AppState>) {
     if let Some(n) = st.guest_cancel.lock().unwrap().take() {
@@ -398,6 +443,7 @@ fn main() {
                     })
                 })),
                 peers: tokio::sync::Mutex::new(HashMap::new()),
+                relay: Default::default(),
             });
             Ok(())
         })
@@ -424,6 +470,12 @@ fn main() {
             join_room,
             cancel_join,
             net_status,
+            expose_offer,
+            relay_pull_offer,
+            relay_pull_answer,
+            relay_viewer,
+            relay_drop_viewer,
+            relay_stop,
             app_version,
             open_update
         ])
