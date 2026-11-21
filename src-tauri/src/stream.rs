@@ -408,6 +408,9 @@ struct EncStats {
     fps: f32,
     kbps: f32,
     encoder: String,
+    /// quadros que chegaram da captura e quantos o encoder devolveu vazios (diagnóstico)
+    src_fps: f32,
+    skipped: u32,
 }
 
 /// Se o encoder de hardware falhar durante o uso, não tenta de novo nesta sessão.
@@ -671,6 +674,7 @@ fn encode_loop(
     let mut enc_name = String::new();
     let mut last = Instant::now();
     let (mut n, mut bytes, mut window) = (0u32, 0usize, Instant::now());
+    let (mut got, mut skipped) = (0u32, 0u32);
     let mut dims = ((0, 0), (0, 0));
 
     let mut last_raw: Option<RawFrame> = None;
@@ -679,7 +683,10 @@ fn encode_loop(
         // Tela parada => o Windows não manda quadros. Se alguém entrou ou a qualidade mudou,
         // reaproveita o último quadro para o convidado não ficar com a tela preta.
         let raw = match rx.recv_timeout(Duration::from_millis(150)) {
-            Ok(r) => r,
+            Ok(r) => {
+                got += 1;
+                r
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(_) => match &last_raw {
                 Some(r) if idr.load(Ordering::SeqCst) || v != seen => r.clone(),
@@ -688,9 +695,11 @@ fn encode_loop(
                     if window.elapsed() >= Duration::from_secs(2) && enc.is_some() {
                         let s = window.elapsed().as_secs_f32();
                         let (w, h) = dims.0;
-                        (app)("enc-stats", serde_json::to_value(EncStats { width: w, height: h, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone() }).unwrap());
+                        (app)("enc-stats", serde_json::to_value(EncStats { width: w, height: h, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone(), src_fps: got as f32 / s, skipped }).unwrap());
                         n = 0;
                         bytes = 0;
+                        got = 0;
+                        skipped = 0;
                         window = Instant::now();
                     }
                     continue;
@@ -737,6 +746,7 @@ fn encode_loop(
             }
         };
         if data.is_empty() {
+            skipped += 1;
             continue; // quadro pulado pelo controle de taxa
         }
         let now = Instant::now();
@@ -748,9 +758,11 @@ fn encode_loop(
 
         if window.elapsed() >= Duration::from_secs(1) {
             let s = window.elapsed().as_secs_f32();
-            (app)("enc-stats", serde_json::to_value(EncStats { width: out_dims.0, height: out_dims.1, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone() }).unwrap());
+            (app)("enc-stats", serde_json::to_value(EncStats { width: out_dims.0, height: out_dims.1, fps: n as f32 / s, kbps: bytes as f32 * 8.0 / 1000.0 / s, encoder: enc_name.clone(), src_fps: got as f32 / s, skipped }).unwrap());
             n = 0;
             bytes = 0;
+            got = 0;
+            skipped = 0;
             window = Instant::now();
         }
     }

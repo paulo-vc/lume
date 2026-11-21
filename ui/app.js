@@ -769,9 +769,9 @@ $('br').onchange = qualityChanged;
 function qualityChanged() { invoke('set_quality', { quality: S.q }).catch(err => toast(String(err))); S.rate = 0; adapt(); }
 
 // ---------- qualidade automática ----------
-// Quem assiste manda a cada 2 s como a imagem está chegando (perda de pacotes, travadas, atraso
-// do buffer). Quem transmite ajusta o bitrate pelo pior relato: cai rápido quando alguém engasga
-// e sobe devagar quando todos estão bem, sem passar do máximo escolhido. O encoder muda na hora.
+// Quem assiste manda a cada 2 s como a imagem está chegando (perda de pacotes e atraso do buffer).
+// Quem transmite ajusta o bitrate pelo pior relato: baixa quando a rede de alguém continua ruim e
+// sobe devagar quando todos estão bem, sem passar do máximo escolhido. O encoder muda na hora.
 S.fb = new Map(); S.rate = 0; S.hold = 0; S.sent = -1;
 try { S.auto = localStorage.getItem('sl.auto') !== '0'; } catch { S.auto = true; }
 function feedback(id, a, b) {
@@ -785,13 +785,22 @@ function feedback(id, a, b) {
 function onFb(r) { if (S.sharing) S.fb.set(r.from, { ...r, at: Date.now() }); }
 function adapt() {
   const max = S.q.br * 1000;
+  // Nunca abaixo disto: menos que isso a imagem vira borrão e não compensa.
+  const floor = Math.min(max, Math.max(1500, max * 0.3));
   let target = 0;
   if (S.auto && S.sharing) {
     const now = Date.now();
+    // Cada relato conta uma vez só (antes, o mesmo relato ruim cortava o bitrate várias vezes).
+    const news = [...S.fb.values()].filter(f => !f.used && now - f.at < 7000);
+    news.forEach(f => { f.used = true; });
     const fresh = [...S.fb.values()].filter(f => now - f.at < 7000);
     let cur = S.rate || max;
-    if (fresh.some(f => f.loss > 0.03 || f.fz > 0 || f.jb > 250)) { cur = Math.max(300, cur * 0.7); S.hold = now; }
-    else if (fresh.every(f => f.loss < 0.01 && f.jb < 150) && now - S.hold > 6000) cur = Math.min(max, cur * 1.15);
+    // Só perda de pacotes e atraso da rede contam. "Travadas" ficam de fora: vídeo e tela parada
+    // têm pausas naturais entre quadros, e elas eram lidas como rede ruim.
+    const bad = news.some(f => f.loss > 0.04 || f.jb > 350);
+    S.badRun = bad ? (S.badRun || 0) + 1 : news.length ? 0 : (S.badRun || 0);
+    if (S.badRun >= 2) { cur = Math.max(floor, cur * 0.8); S.hold = now; S.badRun = 0; } // ruim de novo: aí sim baixa
+    else if (!bad && fresh.every(f => f.loss < 0.02 && f.jb < 200) && now - S.hold > 4000) cur = Math.min(max, cur * 1.12);
     S.rate = Math.round(Math.min(cur, max));
     target = S.rate >= max ? 0 : S.rate;
   } else S.rate = 0;
