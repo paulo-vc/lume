@@ -57,9 +57,19 @@ sem instalação e sem servidor próprio. Só entra na sala quem tem o código e
 - **Conexão direta:** IPv4 e IPv6, STUN público para descobrir o endereço externo e **UPnP**: o Lume
   pede ao roteador para abrir uma porta só para cada conexão e a fecha quando a pessoa sai (`net.rs`).
   Com a porta aberta de um dos lados, a conexão passa mesmo que o outro esteja em rede restritiva.
-- **Limite:** não há servidor de retransmissão. Se as duas internets usarem CGNAT e nenhuma tiver
-  IPv6, a conexão direta não é possível. O convite mostra se o seu roteador abriu a porta, se o UPnP
-  está desligado ou se a sua internet usa CGNAT.
+  Vale também para quem assiste: as portas da conexão de quem assiste são abertas no roteador dele
+  e o IP público vai junto na oferta (`net::expose_offer`).
+- **Retransmissão pelo anfitrião** (`relay.rs`): quando dois convidados não conseguem conexão direta
+  (os dois em rede restritiva), quem assiste passa a ver a tela pelo anfitrião, que já está conectado
+  aos dois. O anfitrião puxa a tela de quem transmite uma vez e repassa os mesmos pacotes (sem
+  recodificar) para cada pessoa que precisar; os pedidos de quadro-chave são repassados de volta.
+  Custa ao anfitrião, no upload, o bitrate da transmissão por pessoa retransmitida.
+- **Pedidos de quadro-chave** (`keyreq.rs`): um interceptador entrega ao app os pedidos de imagem
+  completa (PLI/FIR) de quem assiste, que a biblioteca de WebRTC descartaria. Assim uma perda de
+  pacote é recuperada na hora, em vez de esperar o quadro-chave automático (a cada 10 s).
+- **Limite:** não há servidor externo de retransmissão. Se a internet do anfitrião e a de um
+  convidado usarem CGNAT e nenhuma tiver IPv6, os dois não se conectam. O convite mostra se o seu
+  roteador abriu a porta, se o UPnP está desligado ou se a sua internet usa CGNAT.
 
 ## Segurança
 
