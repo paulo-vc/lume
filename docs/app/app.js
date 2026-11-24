@@ -486,7 +486,10 @@ listen('peer-state', ({ payload: [id, st] }) => {
 
 function onHostMsg(text) {
   let m; try { m = JSON.parse(text); } catch { return; }
-  if (m.t === 'hello') { S.me = String(m.you); S.room = { name: String(m.room || 'Sala').slice(0, 40), code: S.joinCode }; rememberRoom(S.joinCode, S.room.name, 'guest'); render(); }
+  if (m.t === 'hello') {
+    S.me = String(m.you); S.room = { name: String(m.room || 'Sala').slice(0, 40), code: S.joinCode }; rememberRoom(S.joinCode, S.room.name, 'guest'); render();
+    if (S.sharing) sendHost({ t: 'live', on: true }); // voltei transmitindo (queda ou troca de anfitrião)
+  }
   if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off, heir: !!x.heir }));
   if (m.t === 'heir' && Array.isArray(m.members)) S.heirPkg = { name: String(m.name || 'Sala').slice(0, 40), members: m.members.slice(0, 32).filter(x => x && /^[0-9a-f]{32}$/.test(x.uid)).map(x => ({ uid: x.uid, name: String(x.name || '').slice(0, 32), av: okAv(x.av) })) };
   if (m.t === 'av') { S.avs.set(String(m.id), okAv(m.av)); labelTiles(); }
@@ -819,6 +822,8 @@ async function guestStart() {
   } catch (err) {
     pc.close(); if (S.guestPc === pc) S.guestPc = S.guestDc = S.hostMs = null;
     if (String(err) !== 'Cancelado') toast(String(err), 5000);
+    // Não consegui voltar para a sala: a transmissão que tinha ficado ligada para a volta para.
+    if (S.sharing && !S.role && String(err) !== 'Cancelado') stopShare();
     if ($('jStatus')) { $('jStatus').textContent = ''; $('go').disabled = false; $('jCode').disabled = false; $('jName').disabled = false; }
   }
 }
@@ -830,7 +835,8 @@ function lost() {
   // Quem assume: o que o anfitrião indicou ao sair ou, se ele caiu, o herdeiro da última lista.
   const heir = bye === 'closed' ? S.byeHeir : bye ? null : (S.members.find(m => m.heir) || {}).id;
   const heirName = heir && (S.members.find(m => m.id === heir) || {}).name;
-  leave();
+  // Se vou voltar para a sala (queda ou troca de anfitrião), minha transmissão continua.
+  leave(bye !== 'kick' && !!code && !(bye === 'closed' && !heir));
   if (bye === 'kick') return toast('O anfitrião removeu você da sala', 5000);
   if (!code) return toast('A conexão com a sala caiu', 5000);
   if (heir && heir === me && pkg) {
@@ -932,7 +938,10 @@ setInterval(adapt, 2000);
 paintRate();
 
 // ---------- sair ----------
-function leave() {
+// keepShare: saída por queda ou troca de anfitrião, em que a pessoa volta sozinha para a sala.
+// A transmissão dela continua; quem assiste reconecta quando ela voltar.
+function leave(keepShare = false) {
+  if (keepShare !== true) keepShare = false; // (leave também é usado direto como evento de clique)
   const was = S.role;
   if (was === 'guest') sendHost({ t: 'bye' });
   if (was === 'host') {
@@ -941,10 +950,10 @@ function leave() {
     broadcast({ t: 'closed', heir });
     if (heir) { const r = curSaved(); if (r) { r.role = 'guest'; saveRooms(); } toast(`${heir} agora é o anfitrião da sala`); }
   }
-  stopShare();
+  if (!keepShare) stopShare();
   for (const id of [...S.streams.keys()]) closeStream(id);
   // O anfitrião espera o aviso "sala fechada" sair antes de derrubar as conexões.
-  if (was) setTimeout(() => { if (!S.role) invoke('close_room').catch(() => {}); }, was === 'host' ? 400 : 0);
+  if (was) setTimeout(() => { if (!S.role) invoke('close_room', { keepShare: !!(keepShare && S.sharing) }).catch(() => {}); }, was === 'host' ? 400 : 0);
   $('reqs').innerHTML = '';
   S.peers.clear(); S.members = []; S.avs.clear(); S.reqs.clear(); S.failed.clear(); S.relayed.clear(); S.pulls.clear();
   if (S.guestPc) S.guestPc.close();

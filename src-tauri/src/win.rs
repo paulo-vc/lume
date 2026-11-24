@@ -260,8 +260,11 @@ async fn remove_peer(st: State<'_, AppState>, name: String) -> Result<(), String
 }
 
 #[tauri::command]
-async fn close_room(st: State<'_, AppState>) -> Result<(), String> {
-    st.engine.stop_share();
+async fn close_room(st: State<'_, AppState>, keep_share: Option<bool>) -> Result<(), String> {
+    // Reconexão ou troca de anfitrião: a captura continua, só as conexões são refeitas.
+    if !keep_share.unwrap_or(false) {
+        st.engine.stop_share();
+    }
     st.engine.ctl_clear();
     st.relay.stop_all().await;
     let peers: Vec<_> = st.peers.lock().await.drain().map(|(_, p)| p).collect();
