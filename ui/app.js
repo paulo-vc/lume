@@ -7,7 +7,7 @@
 // No app, os comandos vão para o Rust; na versão web (web/lume-web.js), para o navegador.
 const WEB = !window.__TAURI__ && !!window.LumeWeb;
 const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : WEB ? window.LumeWeb.invoke : async () => { throw 'Rode dentro do app' };
-const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
+const listen = window.__TAURI__ ? window.__TAURI__.event.listen : WEB ? window.LumeWeb.listen : () => {};
 const $ = id => document.getElementById(id);
 const ICE = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
 const HOST = '@host', SELF = '@me';
@@ -767,7 +767,20 @@ function stopShare() {
   $('share').textContent = '▶ Compartilhar tela'; $('share').className = 'btn pri inRoom';
   if (was) announceLive();
 }
-$('share').onclick = () => S.sharing ? stopShare() : openPicker();
+$('share').onclick = () => S.sharing ? stopShare() : WEB ? webShare() : openPicker();
+// Versão web: o próprio navegador mostra a escolha de tela, janela ou aba.
+async function webShare() {
+  try {
+    await invoke('set_quality', { quality: S.q });
+    const title = await invoke('start_share_web');
+    S.sharing = title || 'Tela';
+    $('share').textContent = '■ Parar'; $('share').className = 'btn red inRoom';
+    announceLive();
+  } catch (err) {
+    if (!/NotAllowed|AbortError|Permission/i.test(String(err && err.name || err))) toast(String(err && err.message || err), 5000);
+  }
+}
+listen('share-ended', () => { if (S.sharing) stopShare(); }); // a pessoa clicou em "Parar" na barra do navegador
 
 // ---------- entrar como convidado ----------
 async function guestStart() {
