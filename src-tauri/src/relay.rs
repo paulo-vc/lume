@@ -86,7 +86,7 @@ async fn build(track_tx: Option<mpsc::UnboundedSender<Arc<dyn TrackRemote>>>, ex
         .build();
     let (gather_tx, gather_rx) = mpsc::channel(1);
     let mapping = if expose { crate::net::open_port().await } else { None };
-    let v4 = mapping.map(|m| format!("0.0.0.0:{}", m.port)).unwrap_or_else(|| "0.0.0.0:0".into());
+    let addrs = crate::net::udp_addrs(mapping);
     let runtime = webrtc::runtime::default_runtime().ok_or("runtime indisponível")?;
     let pc: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
@@ -95,7 +95,7 @@ async fn build(track_tx: Option<mpsc::UnboundedSender<Arc<dyn TrackRemote>>>, ex
             .with_interceptor_registry(registry)
             .with_handler(Arc::new(Handler { gather_tx, track_tx }))
             .with_runtime(runtime)
-            .with_udp_addrs(vec![v4, "[::]:0".to_string()])
+            .with_udp_addrs(addrs)
             .build()
             .await
             .map_err(|x| e(&x))?,

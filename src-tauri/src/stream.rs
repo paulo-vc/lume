@@ -216,10 +216,7 @@ impl Engine {
         // Porta aberta no roteador (UPnP) só para esta conexão; se não der, segue sem.
         // (A prévia local, "@preview", não precisa.)
         let mapping = if name.starts_with('@') { None } else { crate::net::open_port().await };
-        let v4 = match mapping {
-            Some(m) => format!("0.0.0.0:{}", m.port),
-            None => "0.0.0.0:0".to_string(),
-        };
+        let addrs = crate::net::udp_addrs(mapping);
         let runtime = webrtc::runtime::default_runtime().ok_or("runtime indisponível")?;
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
@@ -229,7 +226,7 @@ impl Engine {
                 .with_handler(handler)
                 .with_runtime(runtime)
                 // IPv6 também: muitos provedores (CGNAT no IPv4) dão IPv6 público, que conecta direto.
-                .with_udp_addrs(vec![v4, "[::]:0".to_string()])
+                .with_udp_addrs(addrs)
                 .build()
                 .await
                 .map_err(|x| e(&x))?,
