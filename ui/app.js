@@ -7,7 +7,7 @@
 // No app, os comandos vão para o Rust; na versão web (web/lume-web.js), para o navegador.
 const WEB = !window.__TAURI__ && !!window.LumeWeb;
 const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : WEB ? window.LumeWeb.invoke : async () => { throw 'Rode dentro do app' };
-const listen = window.__TAURI__ ? window.__TAURI__.event.listen : () => {};
+const listen = window.__TAURI__ ? window.__TAURI__.event.listen : WEB ? window.LumeWeb.listen : () => {};
 const $ = id => document.getElementById(id);
 const ICE = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
 const HOST = '@host', SELF = '@me';
@@ -277,6 +277,7 @@ function openModal(kind) {
     check();
     showNet();
   }
+  if (kind === 'net') return void openNetTest();
   if (kind === 'join') {
     if (S.role) return toast('Saia da sala atual primeiro');
     sheet.innerHTML = `<h2>Entrar numa sala</h2><p>Digite o código que o anfitrião te mandou.</p>
@@ -298,10 +299,47 @@ async function showNet() {
   const n = await invoke('net_status').catch(() => null);
   if (!n || !$('netst')) return;
   if (n.checking) { el.textContent = 'Verificando o roteador…'; return setTimeout(showNet, 1000); }
-  el.style.color = n.upnp ? 'var(--good)' : '';
-  el.textContent = n.upnp ? '● Roteador abre a porta sozinho: convidados em qualquer rede conseguem conectar'
-    : n.cgnat ? 'Sua internet usa CGNAT. Se o convidado também estiver numa rede restritiva, a conexão direta pode falhar; nesse caso, peça para ele criar a sala.'
-    : 'O roteador não abriu a porta (UPnP desligado). Se algum convidado não conectar, ative o UPnP no roteador ou peça para ele criar a sala.';
+  const open = n.upnp || n.ipv6_open;
+  el.style.color = open ? 'var(--good)' : '';
+  el.textContent = open ? `● Sua rede recebe conexões (${n.upnp ? (n.method === 'pcp' ? 'porta aberta por PCP' : 'porta aberta por UPnP') : 'IPv6 com o firewall liberado'}): convidados em qualquer rede conseguem entrar`
+    : 'Sua rede não recebe conexões de fora. Quem estiver em rede fechada pode não conseguir entrar; nesse caso, peça para alguém com rede aberta criar a sala (veja "Testar minha rede").';
+}
+
+// ---------- teste de rede ----------
+// O que a rede deste PC permite, com o que fazer em cada caso. A nota (0 a 3) também é usada
+// para escolher o melhor anfitrião quando a sala troca de mãos.
+S.netScore = 0;
+async function measureNet() {
+  const d = await invoke('net_diagnose').catch(() => null);
+  if (d) {
+    S.net = d; S.netScore = d.score;
+    if (S.role === 'guest') sendHost({ t: 'net', score: d.score }); // o anfitrião usa para escolher o herdeiro
+  }
+  return d;
+}
+if (!WEB) setTimeout(measureNet, 5000);
+async function openNetTest() {
+  sheet.innerHTML = `<h2>Testar minha rede</h2><p>Vê se este PC consegue receber conexões dos amigos e, se não, o que fazer.</p>
+    <div class="nettest" id="nt"><div class="mute">Testando… (uns 5 segundos)</div></div>
+    <div class="act"><button class="btn ghost" id="x">Fechar</button><button class="btn pri" id="again">Testar de novo</button></div>`;
+  $('x').onclick = closeModal;
+  $('again').onclick = openNetTest;
+  modal.classList.add('show');
+  const [d, relays] = await Promise.all([measureNet(), invoke('test_relays').catch(() => 0)]);
+  if (!$('nt')) return;
+  if (!d) { $('nt').innerHTML = '<div class="mute">Não consegui testar.</div>'; return; }
+  const row = (ok, title, text) => `<div class="nrow ${ok === true ? 'ok' : ok === false ? 'bad' : ''}"><b>${ok === true ? '✓' : ok === false ? '✕' : '–'}</b><div><span>${esc(title)}</span><small>${esc(text)}</small></div></div>`;
+  const verdict = {
+    aberta: ['Sua rede é aberta', 'Qualquer amigo consegue entrar nas salas que você criar. Você é um ótimo anfitrião.'],
+    comum: ['Sua rede é comum', 'Conecta direto com a maioria. Com quem tiver rede fechada, a sala usa a retransmissão do anfitrião.'],
+    fechada: ['Sua rede é fechada', 'Entre nas salas de quem tem rede aberta em vez de criar. Para abrir: ligue o UPnP no roteador, peça IPv6 ou IP público ao provedor, ou usem uma rede virtual como o Radmin VPN.'],
+    sem_internet: ['Sem acesso à internet pelo Lume', 'O firewall do Windows ou o antivírus pode estar bloqueando o Lume. Libere o Lume.exe em redes Privada e Pública.'],
+  }[d.nat] || ['', ''];
+  $('nt').innerHTML = `<div class="nverdict n${d.score}"><b>${esc(verdict[0])}</b><span>${esc(verdict[1])}</span></div>`
+    + row(relays > 0, 'Servidores de encontro', relays > 0 ? `${relays} de 3 respondendo` : 'Nenhum respondeu: firewall ou antivírus bloqueando o Lume')
+    + row(d.upnp ? true : d.cgnat ? false : null, 'Roteador abre porta (IPv4)', d.upnp ? (d.method === 'pcp' ? 'Sim, por PCP/NAT-PMP' : 'Sim, por UPnP') : d.cgnat ? 'Não: sua internet usa CGNAT (o IP é do provedor)' : 'Não: UPnP desligado ou não suportado no roteador')
+    + row(d.ipv6 ? (d.ipv6_open ? true : null) : false, 'IPv6', d.ipv6 ? (d.ipv6_open ? 'Tem IPv6 e o roteador libera a entrada' : 'Tem IPv6, mas o roteador não confirmou a liberação da entrada') : 'Sem IPv6 público')
+    + row(d.nat === 'fechada' ? false : d.nat === 'sem_internet' ? false : true, 'Tipo de NAT', d.nat === 'fechada' ? 'Simétrico: a porta de saída muda para cada destino, o que dificulta a conexão direta' : d.nat === 'sem_internet' ? 'Não foi possível medir' : 'Comum: a conexão direta costuma funcionar');
 }
 
 // ---------- pedidos de entrada (anfitrião) ----------
@@ -380,7 +418,12 @@ function sendPeer(id, obj) {
 function broadcast(obj, except) { for (const id of S.peers.keys()) if (id !== except) sendPeer(id, obj); }
 function sendHost(obj) { if (S.guestDc && S.guestDc.readyState === 'open') S.guestDc.send(JSON.stringify(obj)); }
 // Herdeiro: quem está há mais tempo na sala assume se o anfitrião sair ou cair.
-function heirId() { const e = [...S.peers].find(([, p]) => p.open && p.state === 'connected'); return e ? e[0] : null; }
+// Herdeiro: quem tem a rede mais aberta (nota do teste de rede); no empate, quem está há mais tempo.
+function heirId() {
+  let best = null, bestScore = -1;
+  for (const [id, p] of S.peers) if (p.open && p.state === 'connected' && (p.score || 0) > bestScore) { best = id; bestScore = p.score || 0; }
+  return best;
+}
 function pushRoster() {
   if (S.role !== 'host') return;
   const heir = heirId();
@@ -408,6 +451,7 @@ listen('ctl-msg', ({ payload: [id, text] }) => {
   const p = S.peers.get(id); if (S.role !== 'host' || !p) return;
   let m; try { m = JSON.parse(text); } catch { return; }
   // O identificador do PC chega só por aqui (canal cifrado de ponta a ponta), nunca pelo relay.
+  if ((m.t === 'hi' || m.t === 'net') && Number.isInteger(m.score)) { const s = Math.max(0, Math.min(3, m.score)); if (s !== p.score) { p.score = s; pushRoster(); } }
   if (m.t === 'hi' && /^[0-9a-f]{32}$/.test(m.uid || '') && !p.uid) { p.uid = m.uid; if (p.state === 'connected') { rememberMember(p.uid, id, S.avs.get(id) || p.av); pushRoster(); } }
   if (m.t === 'live') { p.live = !!m.on; if (!p.live) stopPull(id); pushRoster(); }
   if (m.t === 'bye') dropPeer(id, 'saiu');
@@ -726,7 +770,20 @@ function stopShare() {
   $('share').textContent = '▶ Compartilhar tela'; $('share').className = 'btn pri inRoom';
   if (was) announceLive();
 }
-$('share').onclick = () => S.sharing ? stopShare() : openPicker();
+$('share').onclick = () => S.sharing ? stopShare() : WEB ? webShare() : openPicker();
+// Versão web: o próprio navegador mostra a escolha de tela, janela ou aba.
+async function webShare() {
+  try {
+    await invoke('set_quality', { quality: S.q });
+    const title = await invoke('start_share_web');
+    S.sharing = title || 'Tela';
+    $('share').textContent = '■ Parar'; $('share').className = 'btn red inRoom';
+    announceLive();
+  } catch (err) {
+    if (!/NotAllowed|AbortError|Permission/i.test(String(err && err.name || err))) toast(String(err && err.message || err), 5000);
+  }
+}
+listen('share-ended', () => { if (S.sharing) stopShare(); }); // a pessoa clicou em "Parar" na barra do navegador
 
 // ---------- entrar como convidado ----------
 async function guestStart() {
@@ -742,7 +799,7 @@ async function guestStart() {
   const pc = recvPc();
   const dc = pc.createDataChannel('ctl');
   const ms = new MediaStream();
-  dc.onopen = () => dc.send(JSON.stringify({ t: 'hi', uid: myUid }));
+  dc.onopen = () => dc.send(JSON.stringify({ t: 'hi', uid: myUid, score: S.netScore }));
   dc.onmessage = e => { if (S.guestPc === pc && typeof e.data === 'string') onHostMsg(e.data); };
   // O canal fecha na hora quando o anfitrião remove a pessoa ou fecha a sala.
   dc.onclose = () => { if (S.role === 'guest' && S.guestPc === pc) lost(); };

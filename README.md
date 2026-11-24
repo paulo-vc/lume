@@ -17,8 +17,13 @@ sem instalação e sem servidor próprio. Só entra na sala quem tem o código e
 - **Reconecta sozinho** se a conexão cair.
 - **A sala continua sem o anfitrião:** se quem criou a sala sai ou cai, quem está há mais tempo
   assume com o mesmo código, e os outros reconectam nele sozinhos.
-- **Versão web:** abre no navegador do celular ou de qualquer PC, sem instalar, para assistir e entrar
-  em salas (`web/`, publicada em `docs/app/`). Criar salas e transmitir continua no app.
+- **Versão web:** abre no navegador, sem instalar (`web/`, publicada em `docs/app/`). No celular,
+  entra em salas e assiste; no computador (Linux, Mac, Chromebook), também cria salas e transmite a
+  tela pelo compartilhamento do navegador.
+- **Linux:** app próprio (`.AppImage` e `.deb`, compilados no GitHub Actions) com a interface da
+  versão web no WebKitGTK, WebRTC ligado e captura de tela pelo PipeWire.
+- **Teste de rede:** "Testar minha rede" diz se o PC recebe conexões (porta, IPv6, tipo de NAT) e o
+  que fazer. Na troca de anfitrião, assume quem tem a rede mais aberta.
 - **Aviso de versão nova** na barra lateral.
 
 ## Entrar numa sala
@@ -57,6 +62,8 @@ sem instalação e sem servidor próprio. Só entra na sala quem tem o código e
 - **Conexão direta:** IPv4 e IPv6, STUN público para descobrir o endereço externo e **UPnP**: o Lume
   pede ao roteador para abrir uma porta só para cada conexão e a fecha quando a pessoa sai (`net.rs`).
   Com a porta aberta de um dos lados, a conexão passa mesmo que o outro esteja em rede restritiva.
+  Sem UPnP, tenta PCP e NAT-PMP (`pcp.rs`); com IPv6 público, pede pelo PCP a abertura do firewall
+  de IPv6 do roteador, o que resolve até atrás de CGNAT no IPv4.
   Vale também para quem assiste: as portas da conexão de quem assiste são abertas no roteador dele
   e o IP público vai junto na oferta (`net::expose_offer`).
 - **Retransmissão pelo anfitrião** (`relay.rs`): quando dois convidados não conseguem conexão direta
