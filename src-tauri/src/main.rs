@@ -382,6 +382,26 @@ async fn net_status() -> net::Status {
     net::status().await
 }
 
+/// Teste completo da rede deste PC (tela "Testar minha rede").
+#[tauri::command]
+async fn net_diagnose() -> net::Diagnosis {
+    net::diagnose().await
+}
+
+/// Quantos servidores de encontro respondem daqui (sem isso, ninguém se encontra).
+#[tauri::command]
+async fn test_relays() -> usize {
+    let (bus, _rx) = Bus::start(format!("lume2/teste/{}", room::new_id()));
+    for _ in 0..30 {
+        let n = bus.online.load(Ordering::SeqCst);
+        if n >= 2 {
+            return n;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    bus.online.load(Ordering::SeqCst)
+}
+
 // ---------- retransmissão pelo anfitrião (ver relay.rs) ----------
 
 #[tauri::command]
@@ -471,6 +491,8 @@ fn main() {
             join_room,
             cancel_join,
             net_status,
+            net_diagnose,
+            test_relays,
             expose_offer,
             relay_pull_offer,
             relay_pull_answer,

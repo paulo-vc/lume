@@ -155,6 +155,78 @@ pub async fn status() -> Status {
     }
 }
 
+/// Endereço que um servidor STUN vê (o "lado de fora" deste PC), pelo mesmo socket.
+async fn stun_seen(sock: &tokio::net::UdpSocket, server: &str) -> Option<SocketAddr> {
+    use tokio::net::lookup_host;
+    let to = lookup_host(server).await.ok()?.find(|a| a.is_ipv4())?;
+    let mut req = [0u8; 20];
+    req[1] = 0x01; // Binding Request
+    req[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes()); // magic cookie
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut req[8..20]);
+    let mut buf = [0u8; 512];
+    for _ in 0..3 {
+        sock.send_to(&req, to).await.ok()?;
+        let Ok(Ok((n, _))) = tokio::time::timeout(Duration::from_millis(700), sock.recv_from(&mut buf)).await else { continue };
+        let r = &buf[..n];
+        if n < 20 || r[8..20] != req[8..20] {
+            continue;
+        }
+        // atributos: procura XOR-MAPPED-ADDRESS (0x0020)
+        let mut i = 20;
+        while i + 4 <= n {
+            let (t, l) = (u16::from_be_bytes([r[i], r[i + 1]]), u16::from_be_bytes([r[i + 2], r[i + 3]]) as usize);
+            if t == 0x0020 && l >= 8 && i + 4 + l <= n && r[i + 5] == 0x01 {
+                let port = u16::from_be_bytes([r[i + 6], r[i + 7]]) ^ 0x2112;
+                let ip = [r[i + 8] ^ 0x21, r[i + 9] ^ 0x12, r[i + 10] ^ 0xA4, r[i + 11] ^ 0x42];
+                return Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), port));
+            }
+            i += 4 + l.div_ceil(4) * 4;
+        }
+    }
+    None
+}
+
+#[derive(Clone, Serialize, Default)]
+pub struct Diagnosis {
+    #[serde(flatten)]
+    pub status: Status,
+    /// "aberta": o roteador abre porta ou há IPv6 com janela aberta;
+    /// "comum": NAT que costuma conectar direto com quase todo mundo;
+    /// "fechada": NAT simétrico (a porta de saída muda a cada destino), só conecta com redes abertas;
+    /// "sem_internet": nenhum servidor STUN respondeu.
+    pub nat: String,
+    /// 0 a 3: quanto esta rede consegue receber conexões (para escolher o melhor anfitrião)
+    pub score: u8,
+}
+
+/// Teste da rede deste PC: o que o roteador permite e que tipo de NAT ele faz.
+pub async fn diagnose() -> Diagnosis {
+    probe().await;
+    let status = status().await;
+    let mut nat = "sem_internet".to_string();
+    if let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+        let a = stun_seen(&sock, "stun.l.google.com:19302").await;
+        let b = stun_seen(&sock, "stun.cloudflare.com:3478").await;
+        nat = match (a, b) {
+            (Some(a), Some(b)) if a.port() != b.port() || a.ip() != b.ip() => "fechada",
+            (Some(_), _) | (_, Some(_)) => "comum",
+            _ => "sem_internet",
+        }
+        .into();
+    }
+    let open = status.upnp || status.ipv6_open;
+    if open && nat != "sem_internet" {
+        nat = "aberta".into();
+    }
+    let score = match nat.as_str() {
+        "aberta" => 3,
+        "comum" => 2,
+        "fechada" => 1,
+        _ => 0,
+    };
+    Diagnosis { status, nat, score }
+}
+
 /// Portas abertas no roteador para uma conexão.
 #[derive(Clone, Copy)]
 pub struct Mapping {
@@ -329,6 +401,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             println!("rede de casa: {:?}", home_ip());
+            let d = diagnose().await;
+            println!("diagnóstico: nat={} nota={}", d.nat, d.score);
             probe().await;
             let s = status().await;
             println!("status: abre porta={} ({}) cgnat={} ipv6={} janela ipv6={}", s.upnp, s.method, s.cgnat, s.ipv6, s.ipv6_open);
