@@ -2461,6 +2461,7 @@ dependencies = [
  "tokio",
  "unsafe-libopus",
  "wasapi",
+ "webkit2gtk",
  "webrtc",
  "windows",
  "windows-capture",
