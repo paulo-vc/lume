@@ -1,0 +1,38 @@
+# Teste manual: o Chrome (pacote do Google) e o Chromium (snap, o "da loja") de uma máquina Ubuntu
+# tentam entrar numa sala pela versão web DESTE branch (a pasta docs/ servida no próprio runner).
+# Como usar: abrir uma sala no Lume, gravar o código em tools/linux-e2e/sala.txt e dar push.
+name: Teste Linux (entrar numa sala)
+
+on:
+  push:
+    paths: ['tools/linux-e2e/sala.txt']
+  workflow_dispatch:
+
+jobs:
+  join:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, chromium-snap]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Instalar o Chromium da loja (snap)
+        if: matrix.browser == 'chromium-snap'
+        run: sudo snap install chromium && /snap/bin/chromium --version
+      - name: Entrar na sala
+        run: |
+          read -r CODE < tools/linux-e2e/sala.txt || true
+          python3 -m http.server 8790 --directory docs >/dev/null 2>&1 &
+          sleep 1
+          if [ "${{ matrix.browser }}" = "chromium-snap" ]; then
+            export CHROME=/snap/bin/chromium PROFILE_DIR="$HOME/lume-e2e"; mkdir -p "$PROFILE_DIR"
+          else
+            google-chrome --version
+          fi
+          node tools/linux-e2e/join.mjs "http://127.0.0.1:8790/app/" "$CODE" 120 | tee saida.txt
+          grep -q 'vídeo do anfitrião: \[' saida.txt

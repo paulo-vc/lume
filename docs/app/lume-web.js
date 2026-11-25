@@ -19,9 +19,17 @@
   const enc = new TextEncoder(), dec = new TextDecoder();
   const hex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
   const rand = n => crypto.getRandomValues(new Uint8Array(n));
+  // As bibliotecas vêm junto do site (libs.js, montado por web/build.js); o CDN só entra se o
+  // arquivo local falhar. Com tempo limite: um bloqueador ou firewall não deixa a entrada travada.
+  const BASE = (document.currentScript && document.currentScript.src) || location.href;
+  const withTimeout = (p, ms, why) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(why), ms))]);
   let libs = null;
-  const load = () => libs || (libs = Promise.all([import(LIBS.mqtt), import(LIBS.chacha), import(LIBS.scrypt)])
-    .then(([m, c, s]) => ({ mqtt: m.default || m, chacha: c.chacha20poly1305, scrypt: s.scryptAsync })));
+  const fromCdn = () => Promise.all([import(LIBS.mqtt), import(LIBS.chacha), import(LIBS.scrypt)])
+    .then(([m, c, s]) => ({ mqtt: m.default || m, chacha: c.chacha20poly1305, scrypt: s.scryptAsync }));
+  const load = () => libs || (libs = withTimeout(
+    import(new URL('libs.js', BASE).href).then(m => ({ mqtt: m.mqtt, chacha: m.chacha20poly1305, scrypt: m.scryptAsync })).catch(fromCdn),
+    20000, 'Não consegui carregar os componentes do Lume. Recarregue a página (Ctrl+Shift+R).')
+    .catch(e => { libs = null; throw e; }));
 
   function normalize(code) {
     const s = String(code).toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
@@ -89,13 +97,16 @@
           clients.push(c);
         }
         const started = Date.now();
+        // Conta para a tela em que pé está: quantos servidores de encontro responderam.
+        const progress = () => emit('join-progress', { online, total: RELAYS.length, secs: Math.round((Date.now() - started) / 1000) });
+        const prog = setInterval(progress, 1000); progress();
         const tick = setInterval(() => {
-          if (Date.now() - started > 10000 && online === 0) { clearInterval(tick); return reject('Sem acesso aos servidores de encontro. Verifique a internet.'); }
+          if (Date.now() - started > 12000 && online === 0) { clearInterval(tick); return reject('Não consegui falar com nenhum servidor de encontro (portas 8084, 8884 e 8081). Algum firewall, antivírus, VPN ou bloqueador no navegador pode estar barrando.'); }
           if (Date.now() - started > 180000) { clearInterval(tick); return reject('O anfitrião não respondeu. Confira o código e se a sala está aberta.'); }
           // Repete o pedido: cobre relay que caiu ou anfitrião que abriu a sala depois.
           for (const c of clients) if (c.connected) c.publish(`${k.topic}/q`, sealed, { qos: 1 });
         }, 4000);
-        const done = () => clearInterval(tick);
+        const done = () => { clearInterval(tick); clearInterval(prog); };
         cancel = () => { done(); reject('Cancelado'); };
         const r0 = resolve, j0 = reject;
         resolve = v => { done(); r0(v); }; reject = e => { done(); j0(e); };

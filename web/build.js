@@ -8,6 +8,8 @@ const out = path.join(root, 'docs', 'app');
 fs.mkdirSync(out, { recursive: true });
 for (const f of ['app.js', 'style.css']) fs.copyFileSync(path.join(root, 'ui', f), path.join(out, f));
 fs.copyFileSync(path.join(__dirname, 'lume-web.js'), path.join(out, 'lume-web.js'));
+// mqtt + @noble num arquivo só (web/vendor/entry.js, gerado com esbuild): não depende de CDN.
+fs.copyFileSync(path.join(__dirname, 'vendor', 'libs.js'), path.join(out, 'libs.js'));
 let html = fs.readFileSync(path.join(root, 'ui', 'index.html'), 'utf8');
 html = html
   .replace('<title>Lume</title>', '<title>Lume na web</title>\n<meta name="description" content="Assista telas compartilhadas no Lume pelo navegador, sem instalar nada.">\n<link rel="icon" href="../icon.png">')
