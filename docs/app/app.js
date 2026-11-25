@@ -786,6 +786,8 @@ async function webShare() {
 listen('share-ended', () => { if (S.sharing) stopShare(); }); // a pessoa clicou em "Parar" na barra do navegador
 
 // ---------- entrar como convidado ----------
+let joinProgress = null;
+listen('join-progress', e => { if (joinProgress) joinProgress(e.payload); });
 async function guestStart() {
   const code = $('jCode').value.trim();
   const name = $('jName').value.trim() || 'Convidado';
@@ -796,7 +798,18 @@ async function guestStart() {
   $('meName').value = name; $('meName').oninput();
   $('go').disabled = true; $('jCode').disabled = true; $('jName').disabled = true;
   $('jStatus').textContent = 'Preparando a conexão…';
-  const pc = recvPc();
+  const unlock = () => { if ($('jStatus')) { $('go').disabled = false; $('jCode').disabled = false; $('jName').disabled = false; } };
+  if (typeof RTCPeerConnection === 'undefined') {
+    unlock(); $('jStatus').textContent = '';
+    return toast('Este navegador está com o WebRTC desligado (alguma extensão de privacidade ou configuração). Sem ele não dá para entrar: use o Chrome, Edge ou Firefox sem essas extensões.', 9000);
+  }
+  let pc;
+  try {
+    pc = recvPc();
+  } catch (err) {
+    unlock(); $('jStatus').textContent = '';
+    return toast('O navegador não deixou abrir a conexão: ' + String(err && err.message || err), 8000);
+  }
   const dc = pc.createDataChannel('ctl');
   const ms = new MediaStream();
   dc.onopen = () => dc.send(JSON.stringify({ t: 'hi', uid: myUid, score: S.netScore }));
@@ -809,10 +822,25 @@ async function guestStart() {
     if (pc.connectionState === 'failed') toast('Não foi possível conectar direto (rede com NAT restritivo)', 5000);
     if (['failed', 'closed'].includes(pc.connectionState) && S.role === 'guest' && S.guestPc === pc) lost();
   };
-  await pc.setLocalDescription(await pc.createOffer());
-  await waitIce(pc);
+  try {
+    // (com tempo limite: se o navegador travar aqui, aparece o motivo em vez de carregar para sempre)
+    await Promise.race([(async () => { await pc.setLocalDescription(await pc.createOffer()); await waitIce(pc); })(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('o navegador não terminou de preparar a conexão em 15 s')), 15000))]);
+    if (!/m=video/.test(pc.localDescription.sdp || '')) throw new Error('o navegador não aceita receber vídeo por WebRTC');
+  } catch (err) {
+    pc.close(); unlock(); if ($('jStatus')) $('jStatus').textContent = '';
+    return toast('Não deu para preparar a conexão: ' + String(err && err.message || err), 8000);
+  }
   S.guestPc = pc; S.guestDc = dc; S.hostMs = ms;
-  if ($('jStatus')) $('jStatus').textContent = saved ? `Chamando ${saved.name}… Se o anfitrião ainda não abriu a sala, fica esperando.` : 'Pedido enviado. Aguardando o anfitrião aceitar…';
+  const waitMsg = saved ? `Chamando ${saved.name}… Se o anfitrião ainda não abriu a sala, fica esperando.` : 'Pedido enviado. Aguardando o anfitrião aceitar…';
+  if ($('jStatus')) $('jStatus').textContent = waitMsg;
+  // Versão web: mostra quantos servidores de encontro responderam e há quanto tempo está esperando.
+  joinProgress = p => {
+    if (!$('jStatus') || S.guestPc !== pc) return;
+    const relays = p.online ? `Pedido enviado por ${p.online} de ${p.total} servidores de encontro.` : `Conectando aos servidores de encontro… (${p.secs} s)`;
+    const late = !saved && p.online && p.secs >= 25 ? ' Ainda sem resposta: confira o código e se a sala do anfitrião está aberta.' : '';
+    $('jStatus').textContent = p.online ? `${relays} ${saved ? `Chamando ${saved.name}…` : 'Aguardando o anfitrião aceitar…'} (${p.secs} s)${late}` : relays;
+  };
   try {
     const sdp = await invoke('join_room', { code, name, av: myAv, uid: myUid, offerSdp: pc.localDescription.sdp });
     await pc.setRemoteDescription({ type: 'answer', sdp });
