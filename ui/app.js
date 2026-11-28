@@ -10,7 +10,7 @@ const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : WEB ? window.Lu
 const listen = window.__TAURI__ ? window.__TAURI__.event.listen : WEB ? window.LumeWeb.listen : () => {};
 const $ = id => document.getElementById(id);
 const ICE = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
-const HOST = '@host', SELF = '@me';
+const HOST = '@host', SELF = '@me', MAX_MEMBERS = 12;
 
 const S = {
   role: null,            // 'host' | 'guest'
@@ -207,7 +207,7 @@ function renderPeers() {
     return `<div class="peer${m.off ? ' off' : ''}"><div class="av">${avInner(m.name, avOf(m.id))}</div><span class="pn">${esc(m.name)}${mine ? ' <i>(você)</i>' : ''}</span>${tag}${act}</div>`;
   };
   $('peers').innerHTML = on.map(row).join('') + (off.length ? '<div class="sep">Fora da sala</div>' + off.map(row).join('') : '');
-  $('pCount').textContent = $('gCount').textContent = `${on.length} / 8`;
+  $('pCount').textContent = $('gCount').textContent = `${on.length} / ${MAX_MEMBERS}`;
 }
 
 // Anfitrião remove alguém da sala (libera a vaga; a pessoa precisa pedir para entrar de novo).
@@ -490,8 +490,8 @@ function onHostMsg(text) {
     S.me = String(m.you); S.room = { name: String(m.room || 'Sala').slice(0, 40), code: S.joinCode }; rememberRoom(S.joinCode, S.room.name, 'guest'); render();
     if (S.sharing) sendHost({ t: 'live', on: true }); // voltei transmitindo (queda ou troca de anfitrião)
   }
-  if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 16).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off, heir: !!x.heir }));
-  if (m.t === 'heir' && Array.isArray(m.members)) S.heirPkg = { name: String(m.name || 'Sala').slice(0, 40), members: m.members.slice(0, 32).filter(x => x && /^[0-9a-f]{32}$/.test(x.uid)).map(x => ({ uid: x.uid, name: String(x.name || '').slice(0, 32), av: okAv(x.av) })) };
+  if (m.t === 'roster' && Array.isArray(m.members)) S.members = m.members.slice(0, 48).map(x => ({ id: String(x.id), name: String(x.name), host: !!x.host, live: !!x.live && !x.off, off: !!x.off, heir: !!x.heir }));
+  if (m.t === 'heir' && Array.isArray(m.members)) S.heirPkg = { name: String(m.name || 'Sala').slice(0, 40), members: m.members.slice(0, 48).filter(x => x && /^[0-9a-f]{32}$/.test(x.uid)).map(x => ({ uid: x.uid, name: String(x.name || '').slice(0, 32), av: okAv(x.av) })) };
   if (m.t === 'av') { S.avs.set(String(m.id), okAv(m.av)); labelTiles(); }
   if (m.t === 'sig') onSig(m);
   if (m.t === 'fb') onFb({ from: String(m.from), loss: +m.loss || 0, fz: +m.fz || 0, jb: +m.jb || 0 });
@@ -1051,8 +1051,7 @@ async function checkUpdate() {
   } catch {}
 }
 $('updGo').onclick = () => { invoke('open_update').catch(() => {}); toast('Baixando no navegador. Feche o Lume e abra o arquivo novo.', 5000); };
-if (!WEB) setTimeout(checkUpdate, 3000);
-setInterval(checkUpdate, 6 * 3600 * 1000);
+if (!WEB) { setTimeout(checkUpdate, 3000); setInterval(checkUpdate, 6 * 3600 * 1000); }
 
 window.addEventListener('resize', layoutTiles);
 window.addEventListener('beforeunload', leave);

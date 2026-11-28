@@ -20,8 +20,9 @@ sem instalação e sem servidor próprio. Só entra na sala quem tem o código e
 - **Versão web:** abre no navegador, sem instalar (`web/`, publicada em `docs/app/`). No celular,
   entra em salas e assiste; no computador (Linux, Mac, Chromebook), também cria salas e transmite a
   tela pelo compartilhamento do navegador.
-- **Linux:** app próprio (`.AppImage` e `.deb`, compilados no GitHub Actions) com a interface da
-  versão web no WebKitGTK, WebRTC ligado e captura de tela pelo PipeWire.
+- **Linux:** app próprio (`.AppImage` e `.deb`, compilados no GitHub Actions) que abre o Lume numa
+  janela própria do Chrome, Chromium (pacote, snap ou flatpak), Edge ou Brave; sem nenhum deles (ou
+  com `LUME_WEBKIT=1`), cai para a interface embutida no WebKitGTK com WebRTC e captura pelo PipeWire.
 - **Teste de rede:** "Testar minha rede" diz se o PC recebe conexões (porta, IPv6, tipo de NAT) e o
   que fazer. Na troca de anfitrião, assume quem tem a rede mais aberta.
 - **Aviso de versão nova** na barra lateral.

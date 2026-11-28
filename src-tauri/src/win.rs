@@ -72,7 +72,7 @@ fn listen_requests(app: AppHandle, keys: Keys) -> (Arc<Bus>, tokio::task::JoinHa
                 p.1 = Instant::now(); // o convidado continua esperando
                 continue;
             }
-            if h.pending.len() >= 16 || req.id.len() > 32 {
+            if h.pending.len() >= 24 || req.id.len() > 32 {
                 continue;
             }
             if req.av.len() > 24_000 || !req.av.starts_with("data:image/") {
@@ -143,7 +143,8 @@ async fn approve_request(st: State<'_, AppState>, id: String) -> Result<String, 
         if !h.accepting.insert(id.clone()) {
             return Err("Esse pedido já está sendo aceito".into());
         }
-        if h.members.len() >= room::MAX_MEMBERS {
+        // +1 conta o próprio anfitrião (a sala comporta MAX_MEMBERS pessoas no total).
+        if h.members.len() + 1 >= room::MAX_MEMBERS {
             h.pending.remove(&id);
             h.accepting.remove(&id);
             answer(h, &id, &JoinRes { ok: false, sdp: String::new(), why: "A sala está cheia".into() });
