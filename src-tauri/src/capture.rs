@@ -121,18 +121,34 @@ impl GraphicsCaptureApiHandler for Handler {
     }
 }
 
-pub type Control = CaptureControl<Handler, Box<dyn std::error::Error + Send + Sync>>;
+pub enum Control {
+    Wgc(CaptureControl<Handler, Box<dyn std::error::Error + Send + Sync>>),
+    Dxgi(crate::dxgi::DxgiControl),
+}
+
+impl Control {
+    pub fn stop(self) -> Result<(), String> {
+        match self {
+            Self::Wgc(c) => c.stop().map_err(|e| e.to_string()),
+            Self::Dxgi(c) => {
+                c.stop();
+                Ok(())
+            }
+        }
+    }
+}
 
 pub fn start(source_id: &str, fps: u32, tx: SyncSender<RawFrame>) -> Result<Control, String> {
     // Nem todas as opções da Graphics Capture API existem no Windows 10 ou Windows 11 antigos:
     // sem borda (IsBorderRequired) exige build 20348+; janelas secundárias e intervalo mínimo
     // (MinUpdateInterval) exigem Windows 11 24H2+. Usa cada uma só quando o sistema suporta.
+    let border_supported = GraphicsCaptureApi::is_border_settings_supported().unwrap_or(false);
     let cursor = if GraphicsCaptureApi::is_cursor_settings_supported().unwrap_or(false) {
         CursorCaptureSettings::WithCursor
     } else {
         CursorCaptureSettings::Default
     };
-    let border = if GraphicsCaptureApi::is_border_settings_supported().unwrap_or(false) {
+    let border = if border_supported {
         DrawBorderSettings::WithoutBorder
     } else {
         DrawBorderSettings::Default
@@ -153,6 +169,13 @@ pub fn start(source_id: &str, fps: u32, tx: SyncSender<RawFrame>) -> Result<Cont
     if let Some(idx) = source_id.strip_prefix("m:") {
         let idx: usize = idx.parse().map_err(|_| "Tela inválida")?;
         let m = Monitor::from_index(idx).map_err(|e| err(&e))?;
+        // No Windows 10 (onde a Graphics Capture API força a borda amarela), captura o monitor via
+        // DXGI Desktop Duplication — sem borda amarela e direto na GPU. Se falhar, cai para WGC.
+        if !border_supported || std::env::var_os("LUME_DXGI").is_some() {
+            if let Ok(c) = crate::dxgi::start(m.as_raw_hmonitor(), fps, tx.clone()) {
+                return Ok(Control::Dxgi(c));
+            }
+        }
         let s = Settings::new(
             m,
             cursor,
@@ -163,7 +186,7 @@ pub fn start(source_id: &str, fps: u32, tx: SyncSender<RawFrame>) -> Result<Cont
             ColorFormat::Bgra8,
             (tx, min_gap),
         );
-        Handler::start_free_threaded(s).map_err(|e| err(&e))
+        Handler::start_free_threaded(s).map(Control::Wgc).map_err(|e| err(&e))
     } else if let Some(h) = source_id.strip_prefix("w:") {
         let h: isize = h.parse().map_err(|_| "Janela inválida")?;
         let w = Window::from_raw_hwnd(h as *mut std::ffi::c_void);
@@ -180,7 +203,7 @@ pub fn start(source_id: &str, fps: u32, tx: SyncSender<RawFrame>) -> Result<Cont
             ColorFormat::Bgra8,
             (tx, min_gap),
         );
-        Handler::start_free_threaded(s).map_err(|e| err(&e))
+        Handler::start_free_threaded(s).map(Control::Wgc).map_err(|e| err(&e))
     } else {
         Err("Fonte inválida".into())
     }

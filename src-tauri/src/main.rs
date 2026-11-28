@@ -8,6 +8,8 @@ mod audio;
 #[cfg(windows)]
 mod capture;
 #[cfg(windows)]
+mod dxgi;
+#[cfg(windows)]
 mod gpu;
 #[cfg(windows)]
 mod keyreq;
