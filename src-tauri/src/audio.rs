@@ -93,6 +93,7 @@ pub fn start(sel: &AudioSel, out: broadcast::Sender<EncodedAudio>) -> Result<Arc
         return Err("Escolha um aplicativo para o áudio".into());
     }
     let mix = sel.mode == "except";
+    let allow_system_fallback = sel.mode == "all";
     let stop = Arc::new(AtomicBool::new(false));
     let s2 = stop.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -101,7 +102,11 @@ pub fn start(sel: &AudioSel, out: broadcast::Sender<EncodedAudio>) -> Result<Arc
         .spawn(move || {
             // O Windows só deixa excluir UM programa por captura. Para tirar a call E o próprio
             // Lume, captura-se cada programa que está tocando e mistura-se o resto.
-            let r = if mix { run_mix(vec![pid, me], out, s2, &ready_tx) } else { run(pid, include, out, s2, &ready_tx) };
+            let r = if mix {
+                run_mix(vec![pid, me], out, s2, &ready_tx)
+            } else {
+                run(pid, include, allow_system_fallback, out, s2, &ready_tx)
+            };
             if let Err(e) = r {
                 let _ = ready_tx.send(Err(e));
             }
@@ -133,9 +138,29 @@ fn new_encoder() -> Result<Enc, String> {
     }
 }
 
+fn open_system_loopback(fmt: &WaveFormat) -> Result<(AudioClient, Option<wasapi::Handle>), String> {
+    let e = |x: wasapi::WasapiError| x.to_string();
+    let dev = wasapi::DeviceEnumerator::new().map_err(e)?.get_default_device(Direction::Render).map_err(e)?;
+    let mut client = dev.get_iaudioclient().map_err(e)?;
+    if client
+        .initialize_client(fmt, Direction::Capture, StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 200_000 }, None)
+        .is_ok()
+    {
+        if let Ok(ev) = client.set_get_eventhandle() {
+            return Ok((client, Some(ev)));
+        }
+    }
+    let mut client = dev.get_iaudioclient().map_err(e)?;
+    client
+        .initialize_client(fmt, Direction::Capture, StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: 200_000 }, None)
+        .map_err(e)?;
+    Ok((client, None))
+}
+
 fn run(
     pid: u32,
     include_tree: bool,
+    allow_system_fallback: bool,
     out: broadcast::Sender<EncodedAudio>,
     stop: Arc<AtomicBool>,
     ready: &std::sync::mpsc::Sender<Result<(), String>>,
@@ -143,11 +168,18 @@ fn run(
     let e = |x: wasapi::WasapiError| x.to_string();
     let _ = wasapi::initialize_mta();
     let fmt = WaveFormat::new(32, 32, SampleType::Float, RATE, CH, None);
-    let mut client = AudioClient::new_application_loopback_client(pid, include_tree).map_err(e)?;
-    client
-        .initialize_client(&fmt, Direction::Capture, StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 200_000 }, None)
-        .map_err(e)?;
-    let event = client.set_get_eventhandle().map_err(e)?;
+    let (client, event) = match AudioClient::new_application_loopback_client(pid, include_tree) {
+        Ok(mut c) => {
+            c.initialize_client(&fmt, Direction::Capture, StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 200_000 }, None)
+                .map_err(e)?;
+            let ev = c.set_get_eventhandle().map_err(e)?;
+            (c, Some(ev))
+        }
+        Err(_) if allow_system_fallback => open_system_loopback(&fmt)?,
+        Err(_) => {
+            return Err("Áudio por aplicativo exige Windows 11 (ou Windows 10 mais recente). Escolha \"PC inteiro\" ou \"Sem áudio\".".into());
+        }
+    };
     let cap = client.get_audiocaptureclient().map_err(e)?;
     client.start_stream().map_err(e)?;
     let enc = new_encoder()?;
@@ -163,7 +195,11 @@ fn run(
     let start = Instant::now();
     let mut sent_frames: u64 = 0;
     while !stop.load(Ordering::SeqCst) {
-        let _ = event.wait_for_event(10);
+        if let Some(ev) = &event {
+            let _ = ev.wait_for_event(10);
+        } else {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let _ = cap.read_from_device_to_deque(&mut q);
         let due = (start.elapsed().as_micros() as u64 * RATE as u64 / 1_000_000) / FRAME as u64;
         if q.len() < chunk && sent_frames + 3 < due {
@@ -262,6 +298,10 @@ fn run_mix(
     ready: &std::sync::mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
     let _ = wasapi::initialize_mta();
+    // Garante que o Windows suporta captura por aplicativo antes de iniciar a mistura (senão ficaria mudo no Windows 10).
+    if AudioClient::new_application_loopback_client(std::process::id(), true).is_err() {
+        return Err("Excluir o áudio da call exige Windows 11 (ou Windows 10 mais recente). Escolha \"PC inteiro\" ou \"Sem áudio\".".into());
+    }
     let enc = new_encoder()?;
     let _ = ready.send(Ok(()));
 

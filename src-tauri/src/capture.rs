@@ -3,10 +3,10 @@
 
 use serde::Serialize;
 use std::sync::mpsc::SyncSender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
-use windows_capture::graphics_capture_api::InternalCaptureControl;
+use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
 use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, MinimumUpdateIntervalSettings,
@@ -76,18 +76,29 @@ pub struct Handler {
     /// o dispositivo da captura serve também para converter e codificar
     gpu_ok: bool,
     ring: crate::gpu::CopyRing,
+    /// controle manual de FPS quando o Windows não suporta MinUpdateInterval (Windows 10 / 11 < 24H2)
+    min_gap: Option<Duration>,
+    last_sent: Option<Instant>,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
-    type Flags = SyncSender<RawFrame>;
+    type Flags = (SyncSender<RawFrame>, Option<Duration>);
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         let gpu_ok = crate::gpu::prepare_device(&ctx.device);
-        Ok(Self { tx: ctx.flags, scratch: Vec::new(), gpu_ok, ring: crate::gpu::CopyRing::new() })
+        let (tx, min_gap) = ctx.flags;
+        Ok(Self { tx, scratch: Vec::new(), gpu_ok, ring: crate::gpu::CopyRing::new(), min_gap, last_sent: None })
     }
 
     fn on_frame_arrived(&mut self, frame: &mut Frame, _c: InternalCaptureControl) -> Result<(), Self::Error> {
+        if let Some(gap) = self.min_gap {
+            let now = Instant::now();
+            if self.last_sent.is_some_and(|t| now.duration_since(t) < gap) {
+                return Ok(());
+            }
+            self.last_sent = Some(now);
+        }
         if self.gpu_ok && !crate::gpu::disabled() {
             // Só uma cópia de textura dentro da placa de vídeo; nada vem para a memória.
             let (w, h) = (frame.width() as usize, frame.height() as usize);
@@ -113,20 +124,44 @@ impl GraphicsCaptureApiHandler for Handler {
 pub type Control = CaptureControl<Handler, Box<dyn std::error::Error + Send + Sync>>;
 
 pub fn start(source_id: &str, fps: u32, tx: SyncSender<RawFrame>) -> Result<Control, String> {
-    let interval = MinimumUpdateIntervalSettings::Custom(Duration::from_micros(1_000_000 / fps.max(1) as u64));
+    // Nem todas as opções da Graphics Capture API existem no Windows 10 ou Windows 11 antigos:
+    // sem borda (IsBorderRequired) exige build 20348+; janelas secundárias e intervalo mínimo
+    // (MinUpdateInterval) exigem Windows 11 24H2+. Usa cada uma só quando o sistema suporta.
+    let cursor = if GraphicsCaptureApi::is_cursor_settings_supported().unwrap_or(false) {
+        CursorCaptureSettings::WithCursor
+    } else {
+        CursorCaptureSettings::Default
+    };
+    let border = if GraphicsCaptureApi::is_border_settings_supported().unwrap_or(false) {
+        DrawBorderSettings::WithoutBorder
+    } else {
+        DrawBorderSettings::Default
+    };
+    let (interval, min_gap) = if GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false) {
+        (MinimumUpdateIntervalSettings::Custom(Duration::from_micros(1_000_000 / fps.max(1) as u64)), None)
+    } else {
+        // 85% do intervalo: não descarta quadros em 60 Hz @ 60 fps e limita monitores 120/144/240 Hz.
+        (MinimumUpdateIntervalSettings::Default, Some(Duration::from_micros(850_000 / fps.max(1) as u64)))
+    };
+    let secondary_win = if GraphicsCaptureApi::is_secondary_windows_supported().unwrap_or(false) {
+        SecondaryWindowSettings::Include
+    } else {
+        SecondaryWindowSettings::Default
+    };
+
     let err = |e: &dyn std::fmt::Display| format!("Falha ao iniciar a captura: {e}");
     if let Some(idx) = source_id.strip_prefix("m:") {
         let idx: usize = idx.parse().map_err(|_| "Tela inválida")?;
         let m = Monitor::from_index(idx).map_err(|e| err(&e))?;
         let s = Settings::new(
             m,
-            CursorCaptureSettings::WithCursor,
-            DrawBorderSettings::WithoutBorder,
+            cursor,
+            border,
             SecondaryWindowSettings::Default,
             interval,
             DirtyRegionSettings::Default,
             ColorFormat::Bgra8,
-            tx,
+            (tx, min_gap),
         );
         Handler::start_free_threaded(s).map_err(|e| err(&e))
     } else if let Some(h) = source_id.strip_prefix("w:") {
@@ -137,13 +172,13 @@ pub fn start(source_id: &str, fps: u32, tx: SyncSender<RawFrame>) -> Result<Cont
         }
         let s = Settings::new(
             w,
-            CursorCaptureSettings::WithCursor,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Include,
+            cursor,
+            border,
+            secondary_win,
             interval,
             DirtyRegionSettings::Default,
             ColorFormat::Bgra8,
-            tx,
+            (tx, min_gap),
         );
         Handler::start_free_threaded(s).map_err(|e| err(&e))
     } else {
