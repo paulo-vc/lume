@@ -14,7 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::Sha256;
 use std::io::{Read, Write};
 
-pub const MAX_MEMBERS: usize = 8;
+pub const MAX_MEMBERS: usize = 12;
 /// Base32 de Crockford: sem I, L, O, U (não confunde ao ditar ou digitar).
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 

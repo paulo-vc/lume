@@ -5,6 +5,7 @@ name: Teste Linux (entrar numa sala)
 
 on:
   push:
+    branches: ['**', '!main']
     paths: ['tools/linux-e2e/sala.txt']
   workflow_dispatch:
 

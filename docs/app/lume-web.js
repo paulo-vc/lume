@@ -136,12 +136,14 @@
   let capKbps = 0;
   const senders = () => [...peers.values(), ...viewers.values()].flatMap(p => p.pc.getSenders());
   function applyTracks(pc) {
+    const ops = [];
     for (const t of pc.getTransceivers()) {
       const kind = t.receiver.track && t.receiver.track.kind;
       const track = share && share.getTracks().find(x => x.kind === kind) || null;
       try { t.direction = 'sendonly'; } catch {}
-      t.sender.replaceTrack(track).catch(() => {});
+      ops.push(t.sender.replaceTrack(track).catch(() => {}));
     }
+    return Promise.all(ops);
   }
   async function applyBitrate() {
     const max = (capKbps > 0 ? Math.min(capKbps, quality.br * 1000) : quality.br * 1000) * 1000;
@@ -161,7 +163,7 @@
     share = stream;
     const v = stream.getVideoTracks()[0];
     if (v) { v.contentHint = 'motion'; v.onended = () => emit('share-ended', null); }
-    for (const p of [...peers.values(), ...viewers.values()]) applyTracks(p.pc);
+    await Promise.all([...peers.values(), ...viewers.values()].map(p => applyTracks(p.pc)));
     applyBitrate();
     // O rótulo do navegador às vezes é um identificador interno; só usa quando parece um nome.
     const label = v && v.label || '';
@@ -185,7 +187,7 @@
   let host = null;
   const peers = new Map();   // nome -> { pc, dc } (convidados, no anfitrião)
   const viewers = new Map(); // nome -> { pc } (quem assiste a minha tela, sendo convidado)
-  const MAX = 8;
+  const MAX = 12;
 
   async function startBus(code) {
     const { mqtt } = await load();
@@ -202,7 +204,7 @@
         if (h.answered.has(req.id)) return publish(h, req.id, h.answered.get(req.id));
         const p = h.pending.get(req.id);
         if (p) { p.at = Date.now(); return; }
-        if (h.pending.size >= 16) return;
+        if (h.pending.size >= 24) return;
         req.name = String(req.name || '').trim().slice(0, 32) || 'Convidado';
         req.av = typeof req.av === 'string' && req.av.length <= 24000 && req.av.startsWith('data:image/') ? req.av : '';
         h.pending.set(req.id, { req, at: Date.now() });
@@ -230,7 +232,7 @@
     const deadline = setTimeout(() => { if (pc.connectionState !== 'connected') emit('peer-state', [name, 'failed']); }, 30000);
     pc.onconnectionstatechange = () => {
       const st = pc.connectionState;
-      if (st === 'connected') clearTimeout(deadline);
+      if (st === 'connected' || st === 'failed' || st === 'closed') clearTimeout(deadline);
       if (st === 'connected' && !sent) { sent = true; }
       emit('peer-state', [name, st]);
     };
@@ -241,7 +243,7 @@
   async function answerOffer(sdp) {
     const pc = new RTCPeerConnection({ iceServers: ICE });
     await pc.setRemoteDescription({ type: 'offer', sdp });
-    applyTracks(pc);
+    await applyTracks(pc);
     await pc.setLocalDescription(await pc.createAnswer());
     await gather(pc);
     return pc;
@@ -283,7 +285,7 @@
       const h = host; if (!h) throw 'Nenhuma sala aberta';
       const p = h.pending.get(id); if (!p) throw 'Esse pedido não existe mais';
       if (h.accepting.has(id)) throw 'Esse pedido já está sendo aceito';
-      if (h.members.length >= MAX) { h.pending.delete(id); await answer(h, id, { ok: false, sdp: '', why: 'A sala está cheia' }); throw 'A sala está cheia. Remova alguém para liberar uma vaga.'; }
+      if (h.members.length + 1 >= MAX) { h.pending.delete(id); await answer(h, id, { ok: false, sdp: '', why: 'A sala está cheia' }); throw 'A sala está cheia. Remova alguém para liberar uma vaga.'; }
       h.accepting.add(id);
       let name = p.req.name; const base = name; let n = 2;
       while (h.members.includes(name)) name = `${base} (${n++})`;
