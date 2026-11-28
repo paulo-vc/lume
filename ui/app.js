@@ -29,6 +29,29 @@ const S = {
   enc: null,
 };
 
+// ---------- ícones SVG ----------
+const ICO = {
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  share: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M12 13V7M9 10l3-3 3 3"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  minus: '<path d="M5 12h14"/>',
+  eye: '<path d="M2.1 12S5.6 5 12 5s9.9 7 9.9 7-3.5 7-9.9 7-9.9-7-9.9-7z"/><circle cx="12" cy="12" r="3"/>',
+  eyeOff: '<path d="M9.9 4.2A10.1 10.1 0 0 1 12 4c6.4 0 9.9 8 9.9 8a18.5 18.5 0 0 1-2.2 3.2M6.6 6.6A13.5 13.5 0 0 0 2.1 12s3.5 7 9.9 7a9.7 9.7 0 0 0 5.4-1.6M14.1 14.1a3 3 0 1 1-4.2-4.2M2 2l20 20"/>',
+  vol: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9.5 9.5 0 0 1 0 14"/>',
+  volOff: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M22 9l-6 6M16 9l6 6"/>',
+  pip: '<rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none"/>',
+  focus: '<rect x="3" y="3" width="18" height="11" rx="2"/><rect x="3" y="17" width="7" height="4" rx="1"/><rect x="14" y="17" width="7" height="4" rx="1"/>',
+  fs: '<path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>',
+  fsExit: '<path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  window: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>',
+};
+const ico = (name, sz = 16) => `<svg class="svgi" viewBox="0 0 24 24" width="${sz}" height="${sz}" aria-hidden="true">${ICO[name] || ''}</svg>`;
+const PIP_OK = !!(document.pictureInPictureEnabled && HTMLVideoElement.prototype.requestPictureInPicture);
+
 // ---------- utilidades ----------
 function toast(msg, ms = 2600) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
 function initials(n) { return (n || '?').trim().split(/\s+/).map(p => p[0]).slice(0, 2).join('').toUpperCase() || '?'; }
@@ -97,7 +120,7 @@ function renderRooms() {
     const cur = S.room && S.room.code === r.code;
     const who = r.role === 'host' ? (r.members.length ? r.members.map(m => m.name).join(', ') : 'Você é o anfitrião') : 'Convidado';
     return `<div class="room${cur ? ' on' : ''}" data-code="${esc(r.code)}" title="${esc(r.code)}"><div class="rav">${esc(initials(r.name))}${cur ? '<span class="dot live"></span>' : ''}</div>
-      <div class="rt"><b>${esc(r.name)}</b><small>${esc(who)}</small></div><button class="kick" data-del title="Esquecer esta sala">✕</button></div>`;
+      <div class="rt"><b>${esc(r.name)}</b><small>${esc(who)}</small></div><button class="kick" data-del title="Esquecer esta sala">${ico('x', 14)}</button></div>`;
   }).join('') : '<div class="roomsEmpty">As salas que você criar ou entrar ficam aqui. Clique numa para voltar a ela.</div>';
 }
 $('rooms').onclick = e => {
@@ -152,7 +175,9 @@ $('avFile').onchange = async () => {
     setAv(out);
   } catch { toast('Não consegui abrir essa imagem'); }
 };
-$('theme').onclick = () => { const d = document.documentElement; d.dataset.theme = d.dataset.theme === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('sl.theme', d.dataset.theme); } catch {} };
+function paintTheme() { $('theme').innerHTML = ico(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon', 17); }
+$('theme').onclick = () => { const d = document.documentElement; d.dataset.theme = d.dataset.theme === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('sl.theme', d.dataset.theme); } catch {} paintTheme(); };
+paintTheme();
 renderMe();
 
 // ---------- quem está na sala ----------
@@ -203,7 +228,7 @@ function renderPeers() {
       : m.off ? '<span class="tag wait">fora</span>'
       : m.host ? '<span class="tag">anfitrião</span>'
       : STATE_PT[m.state] ? `<span class="tag wait">${STATE_PT[m.state]}</span>` : '<span></span>';
-    const act = S.role === 'host' && !mine ? `<button class="kick" data-kick="${esc(m.id)}" title="${m.off ? 'Esquecer esta pessoa' : 'Remover da sala'}">✕</button>` : '<span></span>';
+    const act = S.role === 'host' && !mine ? `<button class="kick" data-kick="${esc(m.id)}" title="${m.off ? 'Esquecer esta pessoa' : 'Remover da sala'}">${ico('x', 14)}</button>` : '<span></span>';
     return `<div class="peer${m.off ? ' off' : ''}"><div class="av">${avInner(m.name, avOf(m.id))}</div><span class="pn">${esc(m.name)}${mine ? ' <i>(você)</i>' : ''}</span>${tag}${act}</div>`;
   };
   $('peers').innerHTML = on.map(row).join('') + (off.length ? '<div class="sep">Fora da sala</div>' + off.map(row).join('') : '');
@@ -328,7 +353,7 @@ async function openNetTest() {
   const [d, relays] = await Promise.all([measureNet(), invoke('test_relays').catch(() => 0)]);
   if (!$('nt')) return;
   if (!d) { $('nt').innerHTML = '<div class="mute">Não consegui testar.</div>'; return; }
-  const row = (ok, title, text) => `<div class="nrow ${ok === true ? 'ok' : ok === false ? 'bad' : ''}"><b>${ok === true ? '✓' : ok === false ? '✕' : '–'}</b><div><span>${esc(title)}</span><small>${esc(text)}</small></div></div>`;
+  const row = (ok, title, text) => `<div class="nrow ${ok === true ? 'ok' : ok === false ? 'bad' : ''}"><b>${ico(ok === true ? 'check' : ok === false ? 'x' : 'minus', 15)}</b><div><span>${esc(title)}</span><small>${esc(text)}</small></div></div>`;
   const verdict = {
     aberta: ['Sua rede é aberta', 'Qualquer amigo consegue entrar nas salas que você criar. Você é um ótimo anfitrião.'],
     comum: ['Sua rede é comum', 'Conecta direto com a maioria. Com quem tiver rede fechada, a sala usa a retransmissão do anfitrião.'],
@@ -397,7 +422,7 @@ listen('join-request', async ({ payload: r }) => {
   const el = document.createElement('div');
   el.className = 'reqcard'; el.dataset.id = r.id;
   el.innerHTML = `<div class="av">${avInner(r.name, r.av)}</div><div><b>${esc(r.name)}</b><small>quer entrar na sala</small></div>
-    <button class="btn ghost sm" data-a="no">Recusar</button><button class="btn pri sm" data-a="yes">Aceitar</button><button class="kick" data-a="hide" title="Decidir depois (fica na aba Pedidos)">✕</button>`;
+    <button class="btn ghost sm" data-a="no">Recusar</button><button class="btn pri sm" data-a="yes">Aceitar</button><button class="kick" data-a="hide" title="Decidir depois (fica na aba Pedidos)">${ico('x', 14)}</button>`;
   $('reqs').appendChild(el);
   if (modal.classList.contains('show') && $('inv')) closeModal();
 });
@@ -517,28 +542,64 @@ async function onSig(m) {
 }
 
 // ---------- telas (grade) ----------
+function toggleFs(el) {
+  if (document.fullscreenElement) return void document.exitFullscreen().catch(() => {});
+  try { el.requestFullscreen({ navigationUI: 'hide' }).catch(() => el.requestFullscreen().catch(() => {})); }
+  catch { el.requestFullscreen && el.requestFullscreen(); }
+}
 function makeTile(id) {
   const el = document.createElement('div');
   el.className = 'tile'; el.dataset.id = id;
+  const pipBtn = PIP_OK ? `<button data-a="pip" title="Picture-in-Picture">${ico('pip')}</button>` : '';
   el.innerHTML = id === SELF
     ? `<video autoplay playsinline muted></video><div class="self"><div><b>Você está transmitindo</b><br><span class="what"></span></div></div>
        <div class="tl"><span class="chip"><span class="dot live"></span><span class="res">—</span></span></div>
-       <div class="tb"><button data-a="preview" title="Mostrar/ocultar a prévia da sua tela">👁</button><button data-a="focus" title="Destacar">⤢</button><button data-a="fs" title="Tela cheia">⛶</button></div>`
+       <div class="tb"><button data-a="preview" title="Mostrar/ocultar a prévia da sua tela">${ico('eye')}</button>${pipBtn}<button data-a="focus" title="Destacar">${ico('focus')}</button><button data-a="fs" title="Tela cheia">${ico('fs')}</button></div>`
     : `<video autoplay playsinline></video>
        <div class="tl"><div class="av"></div><span class="chip"><span class="who"></span><span class="res mute"></span></span></div>
-       <div class="tb"><button data-a="mute" title="Silenciar esta tela">🔊</button><input type="range" min="0" max="100" value="100" title="Volume desta tela">
-       <button data-a="focus" title="Destacar">⤢</button><button data-a="fs" title="Tela cheia">⛶</button></div>`;
+       <div class="tb"><button data-a="mute" title="Silenciar esta tela">${ico('vol')}</button><input type="range" min="0" max="100" value="100" title="Volume desta tela">
+       ${pipBtn}<button data-a="focus" title="Destacar">${ico('focus')}</button><button data-a="fs" title="Tela cheia">${ico('fs')}</button></div>`;
   const v = el.querySelector('video');
+  const pipEl = el.querySelector('[data-a=pip]');
+  if (pipEl) {
+    v.addEventListener('enterpictureinpicture', () => { pipEl.classList.add('on'); pipEl.title = 'Sair do Picture-in-Picture'; });
+    v.addEventListener('leavepictureinpicture', () => { pipEl.classList.remove('on'); pipEl.title = 'Picture-in-Picture'; });
+  }
+  let clickT = null;
   el.onclick = e => {
     const b = e.target.closest('[data-a]');
     if (e.target.closest('input')) return;
     if (b && b.dataset.a === 'preview') { setPreview(!S.preview); return; }
-    if (b && b.dataset.a === 'mute') { v.muted = !v.muted; b.classList.toggle('off', v.muted); b.textContent = v.muted ? '🔇' : '🔊'; return; }
-    if (b && b.dataset.a === 'fs') return void (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen());
-    // Clique na tela: destaca (as outras vão para a faixa de baixo). Clique de novo: volta para a grade.
-    S.focus = S.focus === id ? null : id; layoutTiles();
+    if (b && b.dataset.a === 'mute') { v.muted = !v.muted; b.classList.toggle('off', v.muted); b.innerHTML = ico(v.muted ? 'volOff' : 'vol'); b.title = v.muted ? 'Ativar som desta tela' : 'Silenciar esta tela'; return; }
+    if (b && b.dataset.a === 'pip') {
+      if (document.pictureInPictureElement === v) return void document.exitPictureInPicture().catch(() => {});
+      if (!v.srcObject || v.readyState < 1) return toast('Aguarde o vídeo carregar para abrir em Picture-in-Picture');
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      v.requestPictureInPicture().catch(() => toast('Não foi possível abrir o Picture-in-Picture'));
+      return;
+    }
+    if (b && b.dataset.a === 'focus') { S.focus = S.focus === id ? null : id; layoutTiles(); return; }
+    if (b && b.dataset.a === 'fs') return void toggleFs(el);
+    if (document.fullscreenElement === el) return;
+    // Aguarda um instante para o duplo clique ir direto para tela cheia sem refazer a grade antes.
+    clearTimeout(clickT);
+    clickT = setTimeout(() => { S.focus = S.focus === id ? null : id; layoutTiles(); }, 200);
   };
-  el.ondblclick = e => { if (!e.target.closest('.tb')) document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen(); };
+  el.ondblclick = e => {
+    if (e.target.closest('.tb')) return;
+    clearTimeout(clickT);
+    toggleFs(el);
+  };
+  // Em tela cheia, oculta os controles e o cursor após 2,2 s parado (deixa o vídeo em overlay de hardware).
+  let idleT = null;
+  const wake = () => {
+    clearTimeout(idleT);
+    el.classList.remove('idle');
+    if (document.fullscreenElement === el) idleT = setTimeout(() => { if (document.fullscreenElement === el) el.classList.add('idle'); }, 2200);
+  };
+  el.addEventListener('mousemove', wake);
+  el._wakeFs = wake;
+  el._clearIdle = () => { clearTimeout(idleT); el.classList.remove('idle'); };
   const vol = el.querySelector('input');
   if (vol) vol.oninput = () => { v.volume = vol.value / 100; };
   return el;
@@ -550,12 +611,20 @@ function attach(st) {
 }
 function labelTiles() {
   for (const [id, st] of S.streams) {
-    if (id === SELF) { st.el.querySelector('.what').textContent = S.sharing || ''; continue; }
-    st.el.querySelector('.who').textContent = nameOf(id);
-    st.el.querySelector('.av').innerHTML = avInner(nameOf(id), avOf(id));
+    if (id === SELF) {
+      const what = S.sharing || '';
+      if (st._what !== what) { st._what = what; st.el.querySelector('.what').textContent = what; }
+      continue;
+    }
+    const name = nameOf(id), av = avOf(id), key = name + '\0' + av;
+    if (st._labelKey === key) continue;
+    st._labelKey = key;
+    st.el.querySelector('.who').textContent = name;
+    st.el.querySelector('.av').innerHTML = avInner(name, av);
   }
 }
 function layoutTiles() {
+  if (document.fullscreenElement) return;
   const box = $('tiles');
   if (S.focus && !S.streams.has(S.focus)) S.focus = null;
   [...box.children].forEach(el => { const st = S.streams.get(el.dataset.id); if (!st || st.el !== el) el.remove(); });
@@ -576,7 +645,13 @@ function closeStream(id) {
   S.streams.delete(id); clearTimeout(st.timer);
   if (id === SELF) stopPreview(st);
   if (st.pc) st.pc.close();
-  const v = st.el.querySelector('video'); if (v) v.srcObject = null;
+  const v = st.el.querySelector('video');
+  if (v) {
+    if (document.pictureInPictureElement === v) document.exitPictureInPicture().catch(() => {});
+    v.srcObject = null;
+  }
+  if (document.fullscreenElement === st.el) document.exitFullscreen().catch(() => {});
+  if (st.el._clearIdle) st.el._clearIdle();
 }
 // Telas que eu vejo pelo anfitrião porque a conexão direta com quem transmite falhou.
 S.relayed = new Set();
@@ -645,17 +720,18 @@ function stopPull(of) { if (S.pulls.delete(of)) invoke('relay_stop', { source: o
 // Deixa a grade igual à sala: uma tela para cada pessoa que está transmitindo.
 function syncStreams() {
   if (!S.role || !S.me) return;
+  let changed = false;
   const want = new Set(roster().filter(m => m.live && m.id !== S.me && (S.role !== 'host' || m.open)).map(m => m.id));
-  for (const id of [...S.streams.keys()]) if (id !== SELF && !want.has(id)) closeStream(id);
+  for (const id of [...S.streams.keys()]) if (id !== SELF && !want.has(id)) { closeStream(id); changed = true; }
   for (const id of [...S.failed.keys()]) if (!want.has(id)) S.failed.delete(id);
   for (const id of want) {
     if (S.streams.has(id)) continue;
     if (Date.now() - (S.failed.get(id) || 0) < 10000) continue; // falhou há pouco: espera antes de tentar de novo
-    openStream(id);
+    openStream(id); changed = true;
   }
-  if (S.sharing && !S.streams.has(SELF)) { const st = { el: makeTile(SELF) }; S.streams.set(SELF, st); if (S.preview) startPreview(st); paintPreview(st); }
-  if (!S.sharing && S.streams.has(SELF)) closeStream(SELF);
-  layoutTiles();
+  if (S.sharing && !S.streams.has(SELF)) { const st = { el: makeTile(SELF) }; S.streams.set(SELF, st); if (S.preview) startPreview(st); paintPreview(st); changed = true; }
+  if (!S.sharing && S.streams.has(SELF)) { closeStream(SELF); changed = true; }
+  if (changed) layoutTiles(); else labelTiles();
 }
 
 // ---------- prévia da minha tela ----------
@@ -688,7 +764,9 @@ function stopPreview(st) {
 function paintPreview(st) {
   st.el.querySelector('.self').hidden = S.preview;
   const b = st.el.querySelector('[data-a=preview]');
-  b.classList.toggle('off', !S.preview); b.title = S.preview ? 'Ocultar a prévia (economiza um pouco de placa de vídeo)' : 'Mostrar a prévia da sua tela';
+  b.classList.toggle('off', !S.preview);
+  b.innerHTML = ico(S.preview ? 'eye' : 'eyeOff');
+  b.title = S.preview ? 'Ocultar a prévia (economiza um pouco de placa de vídeo)' : 'Mostrar a prévia da sua tela';
 }
 function setPreview(on) {
   S.preview = on;
@@ -704,7 +782,7 @@ listen('enc-fallback', () => toast('A placa de vídeo não aceitou codificar; us
 
 async function openPicker() {
   const [list, procs] = await Promise.all([invoke('list_sources'), invoke('list_processes').catch(() => [])]);
-  const item = s => `<div class="src" data-id="${esc(s.id)}" data-title="${esc(s.title)}" data-pid="${s.pid || 0}" data-proc="${esc(s.process || '')}"><span class="ico">${s.kind === 'monitor' ? '🖥' : '▢'}</span>
+  const item = s => `<div class="src" data-id="${esc(s.id)}" data-title="${esc(s.title)}" data-pid="${s.pid || 0}" data-proc="${esc(s.process || '')}"><span class="ico">${ico(s.kind === 'monitor' ? 'monitor' : 'window', 18)}</span>
     <div><b>${esc(s.title)}</b>${s.process ? `<small>${esc(s.process)}</small>` : ''}</div></div>`;
   const call = procs.find(p => /^(discord|discordptb|discordcanary|teamspeak|ts3client_win64|skype|ms-teams|teams|zoom|whatsapp)\.exe$/i.test(p.name));
   sheet.innerHTML = `<h2>O que você quer transmitir?</h2><p>Captura nativa do Windows, sem barra de compartilhamento na tela.</p>
@@ -750,7 +828,7 @@ async function openPicker() {
       try { await invoke('set_audio', { sel: { mode, pid } }); }
       catch (err) { toast('Vídeo ok, mas o áudio falhou: ' + err); }
       S.sharing = pick.dataset.title; closeModal();
-      $('share').textContent = '■ Parar'; $('share').className = 'btn red inRoom';
+      $('share').innerHTML = `${ico('stop')}Parar`; $('share').className = 'btn red inRoom';
       announceLive();
     } catch (err) { toast(String(err)); }
   };
@@ -767,7 +845,7 @@ function stopShare() {
     if (S.role === 'guest') invoke('drop_viewers').catch(() => {});
   }
   const was = S.sharing; S.sharing = null; S.enc = null; S.fb.clear(); S.rate = 0;
-  $('share').textContent = '▶ Compartilhar tela'; $('share').className = 'btn pri inRoom';
+  $('share').innerHTML = `${ico('share')}Compartilhar tela`; $('share').className = 'btn pri inRoom';
   if (was) announceLive();
 }
 $('share').onclick = () => S.sharing ? stopShare() : WEB ? webShare() : openPicker();
@@ -777,7 +855,7 @@ async function webShare() {
     await invoke('set_quality', { quality: S.q });
     const title = await invoke('start_share_web');
     S.sharing = title || 'Tela';
-    $('share').textContent = '■ Parar'; $('share').className = 'btn red inRoom';
+    $('share').innerHTML = `${ico('stop')}Parar`; $('share').className = 'btn red inRoom';
     announceLive();
   } catch (err) {
     if (!/NotAllowed|AbortError|Permission/i.test(String(err && err.name || err))) toast(String(err && err.message || err), 5000);
@@ -1053,6 +1131,17 @@ async function checkUpdate() {
 $('updGo').onclick = () => { invoke('open_update').catch(() => {}); toast('Baixando no navegador. Feche o Lume e abra o arquivo novo.', 5000); };
 if (!WEB) { setTimeout(checkUpdate, 3000); setInterval(checkUpdate, 6 * 3600 * 1000); }
 
-window.addEventListener('resize', layoutTiles);
+document.addEventListener('fullscreenchange', () => {
+  const fsEl = document.fullscreenElement;
+  for (const st of S.streams.values()) {
+    const isFs = st.el === fsEl;
+    const b = st.el.querySelector('[data-a=fs]');
+    if (b) { b.innerHTML = ico(isFs ? 'fsExit' : 'fs'); b.title = isFs ? 'Sair da tela cheia' : 'Tela cheia'; }
+    if (isFs && st.el._wakeFs) st.el._wakeFs();
+    else if (st.el._clearIdle) st.el._clearIdle();
+  }
+  if (!fsEl) layoutTiles();
+});
+window.addEventListener('resize', () => { if (!document.fullscreenElement) layoutTiles(); });
 window.addEventListener('beforeunload', leave);
 render();
